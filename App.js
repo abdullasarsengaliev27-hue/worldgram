@@ -1,20 +1,38 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import 'react-native-gesture-handler';
+import React, { useEffect, useRef } from 'react';
+import { AppState } from 'react-native';
+import * as Notifications from 'expo-notifications';
+import AppNavigator from './src/navigation/AppNavigator';
+import { registerForPushNotifications } from './src/lib/notifications';
 
 export default function App() {
-  return (
-    <View style={styles.container}>
-      <Text>Open up App.js to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
-  );
-}
+  const notificationListener = useRef();
+  const responseListener = useRef();
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+  useEffect(() => {
+    // Регистрируем push уведомления
+    registerForPushNotifications();
+
+    // Слушаем входящие уведомления
+    notificationListener.current = Notifications.addNotificationReceivedListener(
+      notification => {
+        console.log('Уведомление получено:', notification);
+      }
+    );
+
+    // Слушаем нажатия на уведомления
+    responseListener.current = Notifications.addNotificationResponseReceivedListener(
+      response => {
+        const data = response.notification.request.content.data;
+        console.log('Нажато уведомление:', data);
+      }
+    );
+
+    return () => {
+      Notifications.removeNotificationSubscription(notificationListener.current);
+      Notifications.removeNotificationSubscription(responseListener.current);
+    };
+  }, []);
+
+  return <AppNavigator />;
+}

@@ -1,29 +1,52 @@
 {
   "expo": {
-    "name": "worldgram",
+    "name": "Worldgram",
     "slug": "worldgram",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "userInterfaceStyle": "dark",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#07070F"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.teamogo.worldgram",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Worldgram использует камеру для видеозвонков",
+        "NSMicrophoneUsageDescription": "Worldgram использует микрофон для звонков",
+        "NSPhotoLibraryUsageDescription": "Worldgram использует галерею для отправки фото",
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#07070F"
       },
-      "edgeToEdgeEnabled": true
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_EXTERNAL_STORAGE"
+      ]
     },
-    "web": {
-      "favicon": "./assets/favicon.png"
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "15.1"
+          }
+        }
+      ],
+      "expo-notifications"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "c998e22e-a15e-4367-81ac-f4258af82aad"
+      }
     }
   }
 }
