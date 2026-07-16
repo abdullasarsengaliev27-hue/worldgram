@@ -18,6 +18,8 @@ import FriendsMapScreen from '../screens/FriendsMapScreen';
 import OnboardingScreen from '../screens/OnboardingScreen';
 import TranslateScreen from '../screens/TranslateScreen';
 import EditProfileScreen from '../screens/EditProfileScreen';
+import CreateGroupScreen from '../screens/CreateGroupScreen';
+import StoriesScreen from '../screens/StoriesScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -85,6 +87,8 @@ export default function AppNavigator() {
         <Stack.Screen name="Onboarding" component={OnboardingScreen} />
         <Stack.Screen name="Translate" component={TranslateScreen} />
         <Stack.Screen name="EditProfile" component={EditProfileScreen} />
+        <Stack.Screen name="CreateGroup" component={CreateGroupScreen} />
+        <Stack.Screen name="Stories" component={StoriesScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

@@ -8,7 +8,6 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../lib/supabase';
-import { notifyNewMessage } from '../lib/notifications';
 
 const AI_SUGGESTIONS = [
   'Как прошёл твой день?',
@@ -29,6 +28,7 @@ export default function ChatScreen({ route, navigation }) {
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [replyTo, setReplyTo] = useState(null);
   const flatListRef = useRef(null);
 
   useEffect(() => {
@@ -37,20 +37,14 @@ export default function ChatScreen({ route, navigation }) {
     loadSuggestions();
 
     const subscription = supabase
-  .channel('messages')
-  .on('postgres_changes', {
-    event: 'INSERT', schema: 'public',
-    table: 'messages', filter: `chat_id=eq.${chatId}`
-  }, async (payload) => {
-    setMessages(prev => [...prev, payload.new]);
-
-    // Уведомление только если сообщение не от меня
-    const { data: { user } } = await supabase.auth.getUser();
-    if (payload.new.sender_id !== user?.id) {
-      await notifyNewMessage(userName, payload.new.content);
-    }
-  })
-  .subscribe();
+      .channel('messages')
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public',
+        table: 'messages', filter: `chat_id=eq.${chatId}`
+      }, (payload) => {
+        setMessages(prev => [...prev, payload.new]);
+      })
+      .subscribe();
 
     return () => subscription.unsubscribe();
   }, []);
@@ -76,26 +70,30 @@ export default function ChatScreen({ route, navigation }) {
   const sendMessage = async (text) => {
     const content = text || newMessage.trim();
     if (!content) return;
+
     await supabase.from('messages').insert({
-      chat_id: chatId, sender_id: userId, content
+      chat_id: chatId,
+      sender_id: userId,
+      content,
+      reply_to_content: replyTo?.content || null,
+      reply_to_sender: replyTo?.sender_id || null,
     });
+
     setNewMessage('');
+    setReplyTo(null);
     loadSuggestions();
   };
 
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Нет доступа', 'Разреши доступ к галерее в настройках');
+      Alert.alert('Нет доступа', 'Разреши доступ к галерее');
       return;
     }
-
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.7,
-      allowsEditing: true,
+      quality: 0.7, allowsEditing: true,
     });
-
     if (!result.canceled && result.assets[0]) {
       await uploadImage(result.assets[0].uri);
     }
@@ -104,15 +102,12 @@ export default function ChatScreen({ route, navigation }) {
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
-      Alert.alert('Нет доступа', 'Разреши доступ к камере в настройках');
+      Alert.alert('Нет доступа', 'Разреши доступ к камере');
       return;
     }
-
     const result = await ImagePicker.launchCameraAsync({
-      quality: 0.7,
-      allowsEditing: true,
+      quality: 0.7, allowsEditing: true,
     });
-
     if (!result.canceled && result.assets[0]) {
       await uploadImage(result.assets[0].uri);
     }
@@ -121,58 +116,27 @@ export default function ChatScreen({ route, navigation }) {
   const uploadImage = async (uri) => {
     try {
       setUploading(true);
-  
       const fileExt = uri.split('.').pop().toLowerCase();
       const fileName = `${userId}_${Date.now()}.${fileExt}`;
       const contentType = `image/${fileExt === 'jpg' ? 'jpeg' : fileExt}`;
-  
-      // Читаем файл как base64
-      const base64Data = await FileSystem.readAsStringAsync(uri, {
-        encoding: 'base64',
-      });
-  
+      const base64Data = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const { decode } = require('base64-arraybuffer');
       const arrayBuffer = decode(base64Data);
-  
+
       const { error: uploadError } = await supabase.storage
-        .from('chat-media')
-        .upload(fileName, arrayBuffer, {
-          contentType,
-          upsert: true,
-        });
-  
+        .from('chat-media').upload(fileName, arrayBuffer, { contentType, upsert: true });
       if (uploadError) throw uploadError;
-  
-      const { data: urlData } = supabase.storage
-        .from('chat-media')
-        .getPublicUrl(fileName);
-  
+
+      const { data: urlData } = supabase.storage.from('chat-media').getPublicUrl(fileName);
       await supabase.from('messages').insert({
-        chat_id: chatId,
-        sender_id: userId,
+        chat_id: chatId, sender_id: userId,
         content: `[IMAGE]${urlData.publicUrl}`,
       });
-  
     } catch (error) {
-      Alert.alert('Ошибка', error.message || 'Не удалось загрузить фото');
+      Alert.alert('Ошибка', 'Не удалось загрузить фото');
     } finally {
       setUploading(false);
     }
-  };
-
-  const decode = (base64) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    let result = '';
-    for (let i = 0; i < base64.length; i += 4) {
-      const a = chars.indexOf(base64[i]);
-      const b = chars.indexOf(base64[i + 1]);
-      const c = chars.indexOf(base64[i + 2]);
-      const d = chars.indexOf(base64[i + 3]);
-      result += String.fromCharCode((a << 2) | (b >> 4));
-      if (base64[i + 2] !== '=') result += String.fromCharCode(((b & 15) << 4) | (c >> 2));
-      if (base64[i + 3] !== '=') result += String.fromCharCode(((c & 3) << 6) | d);
-    }
-    return Uint8Array.from(result, c => c.charCodeAt(0));
   };
 
   const showMediaOptions = () => {
@@ -183,14 +147,18 @@ export default function ChatScreen({ route, navigation }) {
     ]);
   };
 
-  const formatTime = (dateStr) => {
-    return new Date(dateStr).toLocaleTimeString([], {
-      hour: '2-digit', minute: '2-digit'
-    });
-  };
+  const formatTime = (dateStr) => new Date(dateStr).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit'
+  });
 
   const isImageMessage = (content) => content?.startsWith('[IMAGE]');
   const getImageUrl = (content) => content?.replace('[IMAGE]', '');
+
+  const getReplyPreview = (content) => {
+    if (!content) return '';
+    if (isImageMessage(content)) return '📸 Фото';
+    return content.length > 40 ? content.substring(0, 40) + '...' : content;
+  };
 
   const renderMessage = ({ item, index }) => {
     const isMe = item.sender_id === userId;
@@ -204,9 +172,20 @@ export default function ChatScreen({ route, navigation }) {
         {showTime && (
           <Text style={styles.timeLabel}>{formatTime(item.created_at)}</Text>
         )}
-        <View style={[styles.messageRow, isMe && styles.messageRowMe]}>
+        <TouchableOpacity
+          style={[styles.messageRow, isMe && styles.messageRowMe]}
+          onLongPress={() => setReplyTo(item)}
+          activeOpacity={0.8}
+        >
           {isImage ? (
             <View style={[styles.imageBubble, isMe && styles.imageBubbleMe]}>
+              {item.reply_to_content && (
+                <View style={styles.replyPreviewInBubble}>
+                  <Text style={styles.replyPreviewText}>
+                    ↩ {getReplyPreview(item.reply_to_content)}
+                  </Text>
+                </View>
+              )}
               <Image
                 source={{ uri: getImageUrl(item.content) }}
                 style={styles.messageImage}
@@ -218,13 +197,20 @@ export default function ChatScreen({ route, navigation }) {
             </View>
           ) : (
             <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
+              {item.reply_to_content && (
+                <View style={styles.replyPreviewInBubble}>
+                  <Text style={styles.replyPreviewText}>
+                    ↩ {getReplyPreview(item.reply_to_content)}
+                  </Text>
+                </View>
+              )}
               <Text style={styles.messageText}>{item.content}</Text>
               <Text style={[styles.messageTime, isMe && styles.messageTimeMe]}>
                 {formatTime(item.created_at)} {isMe && '✓'}
               </Text>
             </View>
           )}
-        </View>
+        </TouchableOpacity>
       </View>
     );
   };
@@ -310,6 +296,24 @@ export default function ChatScreen({ route, navigation }) {
         }
       />
 
+      {/* Панель ответа */}
+      {replyTo && (
+        <View style={styles.replyPanel}>
+          <View style={styles.replyPanelLeft}>
+            <Ionicons name="return-up-back" size={16} color="#6C63FF" />
+            <View style={styles.replyPanelInfo}>
+              <Text style={styles.replyPanelLabel}>Ответ на сообщение</Text>
+              <Text style={styles.replyPanelText} numberOfLines={1}>
+                {getReplyPreview(replyTo.content)}
+              </Text>
+            </View>
+          </View>
+          <TouchableOpacity onPress={() => setReplyTo(null)}>
+            <Ionicons name="close" size={20} color="#555" />
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Input */}
       <View style={styles.inputRow}>
         {!showSuggestions && (
@@ -317,7 +321,6 @@ export default function ChatScreen({ route, navigation }) {
             <Ionicons name="bulb" size={20} color="#6C63FF" />
           </TouchableOpacity>
         )}
-
         <TouchableOpacity
           style={styles.mediaBtn}
           onPress={showMediaOptions}
@@ -329,7 +332,6 @@ export default function ChatScreen({ route, navigation }) {
             color={uploading ? '#555' : '#6C63FF'}
           />
         </TouchableOpacity>
-
         <View style={styles.inputContainer}>
           <TextInput
             style={styles.input}
@@ -340,7 +342,6 @@ export default function ChatScreen({ route, navigation }) {
             multiline
           />
         </View>
-
         <TouchableOpacity
           style={[styles.sendBtn, !newMessage.trim() && styles.sendBtnDisabled]}
           onPress={() => sendMessage()}
@@ -426,6 +427,12 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3, shadowRadius: 6, elevation: 6,
   },
   bubbleThem: { backgroundColor: '#111120', borderBottomLeftRadius: 4 },
+  replyPreviewInBubble: {
+    backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 8,
+    padding: 6, marginBottom: 6,
+    borderLeftWidth: 2, borderLeftColor: 'rgba(255,255,255,0.5)',
+  },
+  replyPreviewText: { color: 'rgba(255,255,255,0.7)', fontSize: 12 },
   messageText: { color: '#fff', fontSize: 15, lineHeight: 21 },
   messageTime: {
     color: 'rgba(255,255,255,0.4)', fontSize: 10,
@@ -438,6 +445,19 @@ const styles = StyleSheet.create({
   },
   imageBubbleMe: { borderBottomLeftRadius: 18, borderBottomRightRadius: 4 },
   messageImage: { width: 220, height: 180 },
+  replyPanel: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: '#0D0D1A', padding: 10,
+    borderTopWidth: 1, borderTopColor: '#1A1A2E',
+    gap: 10,
+  },
+  replyPanelLeft: {
+    flex: 1, flexDirection: 'row',
+    alignItems: 'center', gap: 8,
+  },
+  replyPanelInfo: { flex: 1 },
+  replyPanelLabel: { color: '#6C63FF', fontSize: 11, fontWeight: 'bold' },
+  replyPanelText: { color: '#888', fontSize: 13, marginTop: 2 },
   emptyChat: { alignItems: 'center', justifyContent: 'center', paddingTop: 80 },
   emptyChatEmoji: { fontSize: 50, marginBottom: 12 },
   emptyChatText: { color: '#333', fontSize: 16 },
