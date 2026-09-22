@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ActivityIndicator, Alert, ScrollView, StatusBar
+  ActivityIndicator, Alert, ScrollView, Image
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
@@ -9,9 +9,11 @@ import { supabase } from '../lib/supabase';
 export default function ProfileScreen({ navigation }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [callSummaries, setCallSummaries] = useState([]);
 
   useEffect(() => {
     fetchProfile();
+    loadCallSummaries();
   }, []);
 
   const fetchProfile = async () => {
@@ -28,6 +30,28 @@ export default function ProfileScreen({ navigation }) {
       }
     }
     setLoading(false);
+  };
+
+  const loadCallSummaries = () => {
+    // Моковые данные резюме звонков
+    setCallSummaries([
+      {
+        id: '1',
+        userName: 'Alish',
+        duration: '05:32',
+        date: 'Сегодня 13:20',
+        mood: '😊',
+        topics: ['Планы', 'Работа'],
+      },
+      {
+        id: '2',
+        userName: 'Тестирую',
+        duration: '02:15',
+        date: 'Вчера 18:45',
+        mood: '⚡',
+        topics: ['Встреча'],
+      },
+    ]);
   };
 
   const handleLogout = async () => {
@@ -54,78 +78,83 @@ export default function ProfileScreen({ navigation }) {
   const displayName = profile?.full_name || 'Пользователь';
   const displayUsername = profile?.username || 'username';
   const avatarLetter = displayName[0].toUpperCase();
+  const avatarColor = profile?.avatar_color || '#6C63FF';
+  const avatarEmoji = profile?.avatar_emoji || '😊';
 
   const menuItems = [
     { icon: 'trophy', label: 'Достижения', sub: 'Твои награды и очки', screen: 'Achievements', color: '#FFC107' },
-    { icon: 'map', label: 'Карта друзей', sub: 'Где твои друзья', screen: 'FriendsMap', color: '#00D2D3' },
-    { icon: 'settings', label: 'Настройки', sub: 'Профиль и безопасность', screen: null, color: '#6C63FF' },
+    { icon: 'document-text', label: 'Резюме звонков', sub: 'История разговоров', screen: 'CallSummaries', color: '#6C63FF' },
+    { icon: 'settings', label: 'Настройки', sub: 'Профиль и безопасность', screen: 'Settings', color: '#888' },
     { icon: 'notifications', label: 'Уведомления', sub: 'Управление уведомлениями', screen: null, color: '#FF9F43' },
-    { icon: 'shield-checkmark', label: 'Конфиденциальность', sub: 'Геолокация и данные', screen: null, color: '#4CAF50' },
-    { icon: 'help-circle', label: 'Помощь', sub: 'FAQ и поддержка', screen: null, color: '#A29BFE' },
+    { icon: 'document-text', label: 'Условия использования', sub: 'Правила сервиса', screen: 'Terms', color: '#00D2D3' },
+    { icon: 'lock-closed', label: 'Конфиденциальность', sub: 'Политика данных', screen: 'Privacy', color: '#4CAF50' },
+    { icon: 'help-circle', label: 'Помощь', sub: 'FAQ и поддержка', screen: 'Help', color: '#A29BFE' },
   ];
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <StatusBar barStyle="light-content" />
 
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Профиль</Text>
         <TouchableOpacity
-  style={styles.editBtn}
-  onPress={() => navigation.navigate('EditProfile')}
->
-  <Ionicons name="create-outline" size={20} color="#6C63FF" />
-</TouchableOpacity>
+          style={styles.editBtn}
+          onPress={() => navigation.navigate('EditProfile')}
+        >
+          <Ionicons name="create-outline" size={20} color="#6C63FF" />
+        </TouchableOpacity>
       </View>
 
       {/* Profile Card */}
       <View style={styles.profileCard}>
+
+        {/* Настройки кнопка */}
+        <TouchableOpacity
+          style={styles.settingsQuickBtn}
+          onPress={() => navigation.navigate('Settings')}
+        >
+          <Ionicons name="settings" size={20} color="#6C63FF" />
+        </TouchableOpacity>
+
+        {/* Аватар */}
         <View style={styles.avatarContainer}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>{avatarLetter}</Text>
-          </View>
-          <View style={styles.onlineBadge}>
-            <Text style={styles.onlineBadgeText}>●</Text>
-          </View>
+          {profile?.avatar_url ? (
+            <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+          ) : (
+            <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
+              <Text style={styles.avatarEmoji}>{avatarEmoji}</Text>
+            </View>
+          )}
+          <View style={styles.onlineBadge} />
         </View>
 
+        {/* Имя */}
         <Text style={styles.name}>{displayName}</Text>
         <Text style={styles.username}>@{displayUsername}</Text>
 
-        <View style={styles.tagRow}>
-          <View style={styles.tag}>
-            <Ionicons name="star" size={12} color="#FFC107" />
-            <Text style={styles.tagText}>Уровень 1</Text>
+        {/* О себе */}
+        {profile?.bio ? (
+          <Text style={styles.bio}>{profile.bio}</Text>
+        ) : (
+          <TouchableOpacity
+            onPress={() => navigation.navigate('Settings')}
+          >
+            <Text style={styles.addBio}>+ Добавить о себе</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Телефон */}
+        {profile?.phone_number && profile?.phone_visible && (
+          <View style={styles.phoneRow}>
+            <Ionicons name="call-outline" size={14} color="#6C63FF" />
+            <Text style={styles.phoneText}>{profile.phone_number}</Text>
           </View>
-          <View style={styles.tag}>
-            <Ionicons name="trophy" size={12} color="#6C63FF" />
-            <Text style={styles.tagText}>120 очков</Text>
-          </View>
-        </View>
+        )}
       </View>
 
-      {/* Stats */}
-      <View style={styles.statsContainer}>
-        {[
-          { icon: 'chatbubbles', value: '0', label: 'Чатов', color: '#6C63FF' },
-          { icon: 'videocam', value: '0', label: 'Звонков', color: '#FF6B6B' },
-          { icon: 'people', value: '0', label: 'Друзей', color: '#00D2D3' },
-        ].map((stat, i) => (
-          <View key={i} style={styles.statItem}>
-            <View style={[styles.statIcon, { backgroundColor: stat.color + '22' }]}>
-              <Ionicons name={stat.icon} size={20} color={stat.color} />
-            </View>
-            <Text style={styles.statValue}>{stat.value}</Text>
-            <Text style={styles.statLabel}>{stat.label}</Text>
-          </View>
-        ))}
-      </View>
-
-      {/* Menu */}
+      {/* Меню */}
       <View style={styles.menuContainer}>
         {menuItems.map((item, i) => (
-          { icon: 'language', label: 'Voice Translate', sub: 'AI перевод голоса', screen: 'Translate', color: '#00D2D3' },
           <TouchableOpacity
             key={i}
             style={styles.menuItem}
@@ -144,7 +173,7 @@ export default function ProfileScreen({ navigation }) {
         ))}
       </View>
 
-      {/* Logout */}
+      {/* Выйти */}
       <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
         <Ionicons name="log-out-outline" size={20} color="#FF4444" />
         <Text style={styles.logoutText}>Выйти из аккаунта</Text>
@@ -163,8 +192,7 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', paddingHorizontal: 20,
-    paddingTop: 55, paddingBottom: 16,
+    alignItems: 'center', padding: 20, paddingTop: 55,
   },
   headerTitle: { fontSize: 26, fontWeight: 'bold', color: '#fff' },
   editBtn: {
@@ -173,52 +201,50 @@ const styles = StyleSheet.create({
     justifyContent: 'center', borderWidth: 1, borderColor: '#2A2A3E',
   },
   profileCard: {
-    alignItems: 'center', marginHorizontal: 20,
+    alignItems: 'center', marginHorizontal: 16,
     backgroundColor: '#111120', borderRadius: 24,
     padding: 24, marginBottom: 16,
     borderWidth: 1, borderColor: '#1A1A2E',
+    position: 'relative',
+  },
+  settingsQuickBtn: {
+    position: 'absolute', top: 16, right: 16,
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: '#1A1A2E', alignItems: 'center',
+    justifyContent: 'center',
   },
   avatarContainer: { position: 'relative', marginBottom: 16 },
   avatar: {
     width: 90, height: 90, borderRadius: 45,
-    backgroundColor: '#6C63FF', alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: 'center', justifyContent: 'center',
     shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.6, shadowRadius: 20, elevation: 20,
   },
-  avatarText: { fontSize: 40, fontWeight: 'bold', color: '#fff' },
+  avatarImage: {
+    width: 90, height: 90, borderRadius: 45,
+  },
+  avatarEmoji: { fontSize: 44 },
   onlineBadge: {
-    position: 'absolute', bottom: 2, right: 2,
-    width: 22, height: 22, borderRadius: 11,
-    backgroundColor: '#4CAF50', alignItems: 'center',
-    justifyContent: 'center', borderWidth: 2, borderColor: '#111120',
+    position: 'absolute', bottom: 4, right: 4,
+    width: 18, height: 18, borderRadius: 9,
+    backgroundColor: '#4CAF50', borderWidth: 2, borderColor: '#111120',
   },
-  onlineBadgeText: { color: '#fff', fontSize: 8 },
   name: { fontSize: 22, fontWeight: 'bold', color: '#fff', marginBottom: 4 },
-  username: { fontSize: 14, color: '#555', marginBottom: 16 },
-  tagRow: { flexDirection: 'row', gap: 8 },
-  tag: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: '#1A1A2E', borderRadius: 10,
-    paddingHorizontal: 10, paddingVertical: 5,
-    borderWidth: 1, borderColor: '#2A2A3E',
+  username: { fontSize: 14, color: '#555', marginBottom: 10 },
+  bio: {
+    fontSize: 14, color: '#888', textAlign: 'center',
+    maxWidth: 280, lineHeight: 20, marginBottom: 8,
   },
-  tagText: { color: '#ccc', fontSize: 12 },
-  statsContainer: {
-    flexDirection: 'row', marginHorizontal: 20,
-    backgroundColor: '#111120', borderRadius: 20,
-    padding: 16, marginBottom: 16,
-    borderWidth: 1, borderColor: '#1A1A2E',
-    justifyContent: 'space-around',
+  addBio: {
+    fontSize: 14, color: '#6C63FF',
+    marginBottom: 8, fontWeight: '600',
   },
-  statItem: { alignItems: 'center', gap: 6 },
-  statIcon: {
-    width: 44, height: 44, borderRadius: 22,
-    alignItems: 'center', justifyContent: 'center',
+  phoneRow: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 6, marginTop: 4,
   },
-  statValue: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
-  statLabel: { fontSize: 12, color: '#555' },
-  menuContainer: { marginHorizontal: 20, marginBottom: 16 },
+  phoneText: { color: '#6C63FF', fontSize: 13 },
+  menuContainer: { marginHorizontal: 16, marginBottom: 16 },
   menuItem: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#111120', borderRadius: 16,
@@ -235,7 +261,7 @@ const styles = StyleSheet.create({
   logoutBtn: {
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'center', gap: 8,
-    marginHorizontal: 20, padding: 16,
+    marginHorizontal: 16, padding: 16,
     backgroundColor: '#1A0A0A', borderRadius: 16,
     borderWidth: 1, borderColor: '#3A1A1A',
   },

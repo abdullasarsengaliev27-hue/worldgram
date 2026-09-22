@@ -1,36 +1,39 @@
 import 'react-native-gesture-handler';
 import React, { useEffect, useRef } from 'react';
-import { AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import AppNavigator from './src/navigation/AppNavigator';
 import { registerForPushNotifications } from './src/lib/notifications';
+import { startPresence, stopPresence } from './src/lib/presence';
+import { supabase } from './src/lib/supabase';
 
 export default function App() {
-  const notificationListener = useRef();
-  const responseListener = useRef();
+  const userIdRef = useRef(null);
 
   useEffect(() => {
-    // Регистрируем push уведомления
     registerForPushNotifications();
 
-    // Слушаем входящие уведомления
-    notificationListener.current = Notifications.addNotificationReceivedListener(
-      notification => {
-        console.log('Уведомление получено:', notification);
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (user) {
+        userIdRef.current = user.id;
+        startPresence(user.id);
       }
-    );
+    });
 
-    // Слушаем нажатия на уведомления
-    responseListener.current = Notifications.addNotificationResponseReceivedListener(
-      response => {
-        const data = response.notification.request.content.data;
-        console.log('Нажато уведомление:', data);
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        userIdRef.current = session.user.id;
+        startPresence(session.user.id);
+      } else if (event === 'SIGNED_OUT') {
+        if (userIdRef.current) {
+          stopPresence(userIdRef.current);
+          userIdRef.current = null;
+        }
       }
-    );
+    });
 
     return () => {
-      Notifications.removeNotificationSubscription(notificationListener.current);
-      Notifications.removeNotificationSubscription(responseListener.current);
+      if (userIdRef.current) stopPresence(userIdRef.current);
+      data?.subscription?.unsubscribe();
     };
   }, []);
 

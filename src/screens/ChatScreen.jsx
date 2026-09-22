@@ -8,6 +8,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../lib/supabase';
+import { sendPushToUser, showLocalNotification } from '../lib/notifications';
+import { getBackground } from '../lib/backgrounds';
 
 const AI_SUGGESTIONS = [
   'Как прошёл твой день?',
@@ -29,25 +31,40 @@ export default function ChatScreen({ route, navigation }) {
   const [showSuggestions, setShowSuggestions] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
+  const [chatBackground, setChatBackground] = useState('default');
   const flatListRef = useRef(null);
 
   useEffect(() => {
     getUser();
     fetchMessages();
     loadSuggestions();
+    loadBackground();
 
     const subscription = supabase
-      .channel('messages')
+      .channel(`chat-${chatId}`)
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public',
-        table: 'messages', filter: `chat_id=eq.${chatId}`
+        table: 'messages', filter: `chat_id=eq.${chatId}`,
       }, (payload) => {
-        setMessages(prev => [...prev, payload.new]);
+        setMessages(prev => {
+          const exists = prev.find(m => m.id === payload.new.id);
+          if (exists) return prev;
+          return [...prev, payload.new];
+        });
+        setTimeout(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }, 100);
       })
       .subscribe();
 
-    return () => subscription.unsubscribe();
-  }, []);
+    return () => supabase.removeChannel(subscription);
+  }, [chatId]);
+
+  const loadBackground = async () => {
+    const { data } = await supabase
+      .from('chats').select('chat_background').eq('id', chatId).single();
+    if (data?.chat_background) setChatBackground(data.chat_background);
+  };
 
   const loadSuggestions = () => {
     const shuffled = [...AI_SUGGESTIONS].sort(() => 0.5 - Math.random());
@@ -67,50 +84,75 @@ export default function ChatScreen({ route, navigation }) {
     if (data) setMessages(data);
   };
 
+  const sendPushNotification = async (content) => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const { data: members } = await supabase
+        .from('chat_members').select('user_id')
+        .eq('chat_id', chatId).neq('user_id', user.id);
+
+      if (members?.length > 0) {
+        const { data: senderProfile } = await supabase
+          .from('profiles').select('full_name, username')
+          .eq('id', user.id).single();
+        const senderName = senderProfile?.full_name || senderProfile?.username || 'Пользователь';
+        for (const member of members) {
+          await sendPushToUser(
+            member.user_id,
+            `💬 ${senderName}`,
+            content.startsWith('[IMAGE]') ? '📸 Фото' : content,
+            { type: 'message', chatId }
+          );
+        }
+      }
+    } catch (e) { }
+  };
+
   const sendMessage = async (text) => {
     const content = text || newMessage.trim();
     if (!content) return;
 
-    await supabase.from('messages').insert({
-      chat_id: chatId,
-      sender_id: userId,
-      content,
+    const tempMessage = {
+      id: `temp-${Date.now()}`,
+      chat_id: chatId, sender_id: userId, content,
+      created_at: new Date().toISOString(),
       reply_to_content: replyTo?.content || null,
       reply_to_sender: replyTo?.sender_id || null,
-    });
+    };
 
+    setMessages(prev => [...prev, tempMessage]);
     setNewMessage('');
     setReplyTo(null);
+    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+
+    const { data } = await supabase.from('messages').insert({
+      chat_id: chatId, sender_id: userId, content,
+      reply_to_content: replyTo?.content || null,
+      reply_to_sender: replyTo?.sender_id || null,
+    }).select().single();
+
+    if (data) {
+      setMessages(prev => prev.map(m => m.id === tempMessage.id ? data : m));
+    }
+
+    sendPushNotification(content);
     loadSuggestions();
   };
 
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Нет доступа', 'Разреши доступ к галерее');
-      return;
-    }
+    if (status !== 'granted') { Alert.alert('Нет доступа', 'Разреши доступ к галерее'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.7, allowsEditing: true,
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7, allowsEditing: true,
     });
-    if (!result.canceled && result.assets[0]) {
-      await uploadImage(result.assets[0].uri);
-    }
+    if (!result.canceled && result.assets[0]) await uploadImage(result.assets[0].uri);
   };
 
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Нет доступа', 'Разреши доступ к камере');
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      quality: 0.7, allowsEditing: true,
-    });
-    if (!result.canceled && result.assets[0]) {
-      await uploadImage(result.assets[0].uri);
-    }
+    if (status !== 'granted') { Alert.alert('Нет доступа', 'Разреши доступ к камере'); return; }
+    const result = await ImagePicker.launchCameraAsync({ quality: 0.7, allowsEditing: true });
+    if (!result.canceled && result.assets[0]) await uploadImage(result.assets[0].uri);
   };
 
   const uploadImage = async (uri) => {
@@ -122,11 +164,9 @@ export default function ChatScreen({ route, navigation }) {
       const base64Data = await FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
       const { decode } = require('base64-arraybuffer');
       const arrayBuffer = decode(base64Data);
-
       const { error: uploadError } = await supabase.storage
         .from('chat-media').upload(fileName, arrayBuffer, { contentType, upsert: true });
       if (uploadError) throw uploadError;
-
       const { data: urlData } = supabase.storage.from('chat-media').getPublicUrl(fileName);
       await supabase.from('messages').insert({
         chat_id: chatId, sender_id: userId,
@@ -153,12 +193,13 @@ export default function ChatScreen({ route, navigation }) {
 
   const isImageMessage = (content) => content?.startsWith('[IMAGE]');
   const getImageUrl = (content) => content?.replace('[IMAGE]', '');
-
   const getReplyPreview = (content) => {
     if (!content) return '';
     if (isImageMessage(content)) return '📸 Фото';
     return content.length > 40 ? content.substring(0, 40) + '...' : content;
   };
+
+  const bg = getBackground(chatBackground);
 
   const renderMessage = ({ item, index }) => {
     const isMe = item.sender_id === userId;
@@ -181,27 +222,26 @@ export default function ChatScreen({ route, navigation }) {
             <View style={[styles.imageBubble, isMe && styles.imageBubbleMe]}>
               {item.reply_to_content && (
                 <View style={styles.replyPreviewInBubble}>
-                  <Text style={styles.replyPreviewText}>
-                    ↩ {getReplyPreview(item.reply_to_content)}
-                  </Text>
+                  <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
                 </View>
               )}
               <Image
                 source={{ uri: getImageUrl(item.content) }}
-                style={styles.messageImage}
-                resizeMode="cover"
+                style={styles.messageImage} resizeMode="cover"
               />
               <Text style={[styles.messageTime, isMe && styles.messageTimeMe]}>
                 {formatTime(item.created_at)} {isMe && '✓'}
               </Text>
             </View>
           ) : (
-            <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
+            <View style={[styles.bubble, {
+              backgroundColor: isMe ? bg.bubbleMe : bg.bubbleThem,
+              borderBottomRightRadius: isMe ? 4 : 18,
+              borderBottomLeftRadius: isMe ? 18 : 4,
+            }]}>
               {item.reply_to_content && (
                 <View style={styles.replyPreviewInBubble}>
-                  <Text style={styles.replyPreviewText}>
-                    ↩ {getReplyPreview(item.reply_to_content)}
-                  </Text>
+                  <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
                 </View>
               )}
               <Text style={styles.messageText}>{item.content}</Text>
@@ -217,25 +257,48 @@ export default function ChatScreen({ route, navigation }) {
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={[styles.container, { backgroundColor: bg.colors[0] }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={90}
     >
       <StatusBar barStyle="light-content" />
 
+      {/* Фирменный фон Worldgram */}
+      {bg.branded && (
+        <View style={styles.brandedBg}>
+          <Text style={styles.brandedLogo}>W</Text>
+          <Text style={styles.brandedText}>Worldgram</Text>
+        </View>
+      )}
+
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { backgroundColor: bg.colors[0] }]}>
         <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={22} color="#fff" />
         </TouchableOpacity>
-        <View style={styles.avatar}>
-          <Text style={styles.avatarText}>{userName?.[0]?.toUpperCase() || '?'}</Text>
-          <View style={styles.onlineDot} />
-        </View>
-        <View style={styles.headerInfo}>
-          <Text style={styles.headerName}>{userName}</Text>
-          <Text style={styles.headerStatus}>● Онлайн</Text>
-        </View>
+
+        <TouchableOpacity
+          style={styles.headerProfile}
+          onPress={() => {
+            if (route.params?.userId) {
+              navigation.navigate('UserProfile', { userId: route.params.userId });
+            }
+          }}
+        >
+          {route.params?.avatarUrl ? (
+            <Image source={{ uri: route.params.avatarUrl }} style={styles.avatarImage} />
+          ) : (
+            <View style={styles.avatar}>
+              <Text style={styles.avatarText}>{userName?.[0]?.toUpperCase() || '?'}</Text>
+              <View style={styles.onlineDot} />
+            </View>
+          )}
+          <View style={styles.headerInfo}>
+            <Text style={styles.headerName}>{userName}</Text>
+            <Text style={styles.headerStatus}>● Онлайн</Text>
+          </View>
+        </TouchableOpacity>
+
         <View style={styles.headerActions}>
           <TouchableOpacity
             style={styles.headerBtn}
@@ -243,15 +306,31 @@ export default function ChatScreen({ route, navigation }) {
           >
             <Ionicons name="videocam" size={20} color="#6C63FF" />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerBtn}>
-            <Ionicons name="call" size={20} color="#6C63FF" />
+          <TouchableOpacity
+            style={styles.headerBtn}
+            onPress={() => navigation.navigate('ChatBackground', {
+              chatId, currentBackground: chatBackground,
+            })}
+          >
+            <Ionicons name="color-palette-outline" size={20} color="#6C63FF" />
           </TouchableOpacity>
+          {route.params?.isGroup && (
+            <TouchableOpacity
+              style={styles.headerBtn}
+              onPress={() => navigation.navigate('GroupInfo', {
+                chatId, groupName: userName,
+                groupAvatar: route.params?.groupAvatar,
+              })}
+            >
+              <Ionicons name="information-circle-outline" size={22} color="#6C63FF" />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
       {/* AI подсказки */}
       {showSuggestions && (
-        <View style={styles.suggestionsContainer}>
+        <View style={[styles.suggestionsContainer, { backgroundColor: bg.colors[0] }]}>
           <View style={styles.suggestionsHeader}>
             <View style={styles.suggestionsTitleRow}>
               <Ionicons name="bulb" size={14} color="#6C63FF" />
@@ -263,10 +342,7 @@ export default function ChatScreen({ route, navigation }) {
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
             {suggestions.map((s, i) => (
-              <TouchableOpacity
-                key={i} style={styles.suggestionCard}
-                onPress={() => sendMessage(s)}
-              >
+              <TouchableOpacity key={i} style={styles.suggestionCard} onPress={() => sendMessage(s)}>
                 <Text style={styles.suggestionText}>{s}</Text>
                 <Text style={styles.suggestionSend}>Отправить →</Text>
               </TouchableOpacity>
@@ -298,7 +374,7 @@ export default function ChatScreen({ route, navigation }) {
 
       {/* Панель ответа */}
       {replyTo && (
-        <View style={styles.replyPanel}>
+        <View style={[styles.replyPanel, { backgroundColor: bg.colors[0] }]}>
           <View style={styles.replyPanelLeft}>
             <Ionicons name="return-up-back" size={16} color="#6C63FF" />
             <View style={styles.replyPanelInfo}>
@@ -315,22 +391,15 @@ export default function ChatScreen({ route, navigation }) {
       )}
 
       {/* Input */}
-      <View style={styles.inputRow}>
+      <View style={[styles.inputRow, { backgroundColor: bg.colors[0] }]}>
         {!showSuggestions && (
           <TouchableOpacity style={styles.aiBtn} onPress={() => setShowSuggestions(true)}>
             <Ionicons name="bulb" size={20} color="#6C63FF" />
           </TouchableOpacity>
         )}
-        <TouchableOpacity
-          style={styles.mediaBtn}
-          onPress={showMediaOptions}
-          disabled={uploading}
-        >
-          <Ionicons
-            name={uploading ? 'hourglass' : 'camera'}
-            size={20}
-            color={uploading ? '#555' : '#6C63FF'}
-          />
+        <TouchableOpacity style={styles.mediaBtn} onPress={showMediaOptions} disabled={uploading}>
+          <Ionicons name={uploading ? 'hourglass' : 'camera'} size={20}
+            color={uploading ? '#555' : '#6C63FF'} />
         </TouchableOpacity>
         <View style={styles.inputContainer}>
           <TextInput
@@ -355,22 +424,30 @@ export default function ChatScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#07070F' },
+  container: { flex: 1 },
+  brandedBg: {
+    position: 'absolute', alignSelf: 'center',
+    top: '40%', alignItems: 'center', opacity: 0.05, zIndex: 0,
+  },
+  brandedLogo: { fontSize: 100, fontWeight: 'bold', color: '#6C63FF' },
+  brandedText: { fontSize: 30, color: '#6C63FF', fontWeight: 'bold' },
   header: {
     flexDirection: 'row', alignItems: 'center',
     padding: 16, paddingTop: 50,
-    backgroundColor: '#0D0D1A',
-    borderBottomWidth: 1, borderBottomColor: '#1A1A2E', gap: 10,
+    borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
+    gap: 10, zIndex: 1,
   },
   backBtn: {
     width: 38, height: 38, borderRadius: 19,
-    backgroundColor: '#1A1A2E', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(26,26,46,0.8)', alignItems: 'center', justifyContent: 'center',
   },
+  headerProfile: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   avatar: {
     width: 42, height: 42, borderRadius: 21,
     backgroundColor: '#6C63FF', alignItems: 'center',
     justifyContent: 'center', position: 'relative',
   },
+  avatarImage: { width: 42, height: 42, borderRadius: 21 },
   avatarText: { fontSize: 18, fontWeight: 'bold', color: '#fff' },
   onlineDot: {
     position: 'absolute', bottom: 0, right: 0,
@@ -380,15 +457,14 @@ const styles = StyleSheet.create({
   headerInfo: { flex: 1 },
   headerName: { fontSize: 16, fontWeight: 'bold', color: '#fff' },
   headerStatus: { fontSize: 11, color: '#4CAF50', marginTop: 1 },
-  headerActions: { flexDirection: 'row', gap: 8 },
+  headerActions: { flexDirection: 'row', gap: 6 },
   headerBtn: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: '#1A1A2E', alignItems: 'center',
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: 'rgba(26,26,46,0.8)', alignItems: 'center',
     justifyContent: 'center', borderWidth: 1, borderColor: '#2A2A3E',
   },
   suggestionsContainer: {
-    backgroundColor: '#0D0D1A',
-    borderBottomWidth: 1, borderBottomColor: '#1A1A2E', paddingVertical: 10,
+    borderBottomWidth: 1, borderBottomColor: '#1A1A2E', paddingVertical: 10, zIndex: 1,
   },
   suggestionsHeader: {
     flexDirection: 'row', justifyContent: 'space-between',
@@ -397,14 +473,14 @@ const styles = StyleSheet.create({
   suggestionsTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   suggestionsTitle: { color: '#6C63FF', fontSize: 12, fontWeight: 'bold' },
   suggestionCard: {
-    backgroundColor: '#1A1A2E', borderRadius: 14,
+    backgroundColor: 'rgba(26,26,46,0.8)', borderRadius: 14,
     padding: 12, marginLeft: 12, maxWidth: 180,
     borderWidth: 1, borderColor: '#2A2A3E',
   },
   suggestionText: { color: '#fff', fontSize: 13, marginBottom: 6, lineHeight: 18 },
   suggestionSend: { color: '#6C63FF', fontSize: 11, fontWeight: '600' },
   refreshCard: {
-    backgroundColor: '#1A1A2E', borderRadius: 14,
+    backgroundColor: 'rgba(26,26,46,0.8)', borderRadius: 14,
     padding: 12, marginLeft: 12, marginRight: 12,
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, borderColor: '#2A2A3E', width: 65, gap: 4,
@@ -412,21 +488,12 @@ const styles = StyleSheet.create({
   refreshText: { color: '#6C63FF', fontSize: 11 },
   messagesList: { padding: 16, paddingBottom: 8 },
   timeLabel: {
-    textAlign: 'center', color: '#333',
+    textAlign: 'center', color: 'rgba(255,255,255,0.3)',
     fontSize: 11, marginVertical: 12,
   },
   messageRow: { marginBottom: 4, alignItems: 'flex-start' },
   messageRowMe: { alignItems: 'flex-end' },
-  bubble: {
-    maxWidth: '78%', borderRadius: 18,
-    padding: 12, paddingBottom: 8,
-  },
-  bubbleMe: {
-    backgroundColor: '#6C63FF', borderBottomRightRadius: 4,
-    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3, shadowRadius: 6, elevation: 6,
-  },
-  bubbleThem: { backgroundColor: '#111120', borderBottomLeftRadius: 4 },
+  bubble: { maxWidth: '78%', borderRadius: 18, padding: 12, paddingBottom: 8 },
   replyPreviewInBubble: {
     backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: 8,
     padding: 6, marginBottom: 6,
@@ -447,38 +514,32 @@ const styles = StyleSheet.create({
   messageImage: { width: 220, height: 180 },
   replyPanel: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#0D0D1A', padding: 10,
-    borderTopWidth: 1, borderTopColor: '#1A1A2E',
-    gap: 10,
+    padding: 10, borderTopWidth: 1, borderTopColor: '#1A1A2E', gap: 10,
   },
-  replyPanelLeft: {
-    flex: 1, flexDirection: 'row',
-    alignItems: 'center', gap: 8,
-  },
+  replyPanelLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
   replyPanelInfo: { flex: 1 },
   replyPanelLabel: { color: '#6C63FF', fontSize: 11, fontWeight: 'bold' },
   replyPanelText: { color: '#888', fontSize: 13, marginTop: 2 },
   emptyChat: { alignItems: 'center', justifyContent: 'center', paddingTop: 80 },
   emptyChatEmoji: { fontSize: 50, marginBottom: 12 },
-  emptyChatText: { color: '#333', fontSize: 16 },
+  emptyChatText: { color: 'rgba(255,255,255,0.3)', fontSize: 16 },
   inputRow: {
     flexDirection: 'row', padding: 12,
     borderTopWidth: 1, borderTopColor: '#1A1A2E',
-    alignItems: 'flex-end', gap: 8,
-    backgroundColor: '#0D0D1A',
+    alignItems: 'flex-end', gap: 8, zIndex: 1,
   },
   aiBtn: {
     width: 42, height: 42, borderRadius: 21,
-    backgroundColor: '#1A1A2E', alignItems: 'center',
+    backgroundColor: 'rgba(26,26,46,0.8)', alignItems: 'center',
     justifyContent: 'center', borderWidth: 1, borderColor: '#2A2A3E',
   },
   mediaBtn: {
     width: 42, height: 42, borderRadius: 21,
-    backgroundColor: '#1A1A2E', alignItems: 'center',
+    backgroundColor: 'rgba(26,26,46,0.8)', alignItems: 'center',
     justifyContent: 'center', borderWidth: 1, borderColor: '#2A2A3E',
   },
   inputContainer: {
-    flex: 1, backgroundColor: '#111120',
+    flex: 1, backgroundColor: 'rgba(26,26,46,0.8)',
     borderRadius: 22, paddingHorizontal: 16,
     paddingVertical: 10, borderWidth: 1, borderColor: '#1A1A2E',
   },

@@ -1,240 +1,381 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Dimensions
+  ActivityIndicator, Alert, Switch, Dimensions
 } from 'react-native';
+import MapView, { Marker, Circle } from 'react-native-maps';
+import * as Location from 'expo-location';
+import { Ionicons } from '@expo/vector-icons';
+import { supabase } from '../lib/supabase';
 
 const { width, height } = Dimensions.get('window');
 
-const MOCK_FRIENDS = [
-  { id: '1', name: 'Алибек', distance: '2.3 км', status: 'online', emoji: '😊', city: 'Алматы' },
-  { id: '2', name: 'Айгерим', distance: '5.1 км', status: 'online', emoji: '🎵', city: 'Алматы' },
-  { id: '3', name: 'Данияр', distance: '12 км', status: 'offline', emoji: '📚', city: 'Алматы' },
-  { id: '4', name: 'Мадина', distance: '0.8 км', status: 'online', emoji: '☕', city: 'Алматы' },
-  { id: '5', name: 'Ержан', distance: '25 км', status: 'online', emoji: '🏃', city: 'Алматы' },
-];
-
 export default function FriendsMapScreen({ navigation }) {
+  const [location, setLocation] = useState(null);
+  const [friends, setFriends] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [locationEnabled, setLocationEnabled] = useState(false);
   const [selectedFriend, setSelectedFriend] = useState(null);
-  const onlineFriends = MOCK_FRIENDS.filter(f => f.status === 'online');
+  const [userId, setUserId] = useState(null);
+  const mapRef = useRef(null);
+
+  useEffect(() => {
+    getUser();
+  }, []);
+
+  const getUser = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user) {
+      setUserId(user.id);
+      checkLocationStatus(user.id);
+      fetchFriends(user.id);
+    }
+  };
+
+  const checkLocationStatus = async (uid) => {
+    const { data } = await supabase
+      .from('profiles')
+      .select('location_enabled, latitude, longitude')
+      .eq('id', uid)
+      .single();
+
+    if (data) {
+      setLocationEnabled(data.location_enabled || false);
+      if (data.latitude && data.longitude) {
+        setLocation({ latitude: data.latitude, longitude: data.longitude });
+      }
+    }
+    setLoading(false);
+  };
+
+  const fetchFriends = async (uid) => {
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .neq('id', uid)
+      .eq('location_enabled', true)
+      .not('latitude', 'is', null);
+
+    if (data) setFriends(data);
+  };
+
+  const toggleLocation = async (value) => {
+    if (value) {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Нет доступа', 'Разреши доступ к геолокации в настройках');
+        return;
+      }
+
+      const loc = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const { latitude, longitude } = loc.coords;
+      setLocation({ latitude, longitude });
+      setLocationEnabled(true);
+
+      await supabase.from('profiles').update({
+        latitude, longitude,
+        location_enabled: true,
+        last_seen: new Date().toISOString(),
+      }).eq('id', userId);
+
+      mapRef.current?.animateToRegion({
+        latitude, longitude,
+        latitudeDelta: 0.05, longitudeDelta: 0.05,
+      }, 1000);
+
+    } else {
+      setLocationEnabled(false);
+      await supabase.from('profiles').update({
+        location_enabled: false,
+      }).eq('id', userId);
+    }
+  };
+
+  const calculateDistance = (lat1, lon1, lat2, lon2) => {
+    const R = 6371;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const d = R * c;
+    return d < 1 ? `${Math.round(d * 1000)}м` : `${d.toFixed(1)}км`;
+  };
+
+  const COLORS = ['#6C63FF', '#FF6B6B', '#00D2D3', '#FF9F43', '#4CAF50'];
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#6C63FF" />
+        <Text style={styles.loadingText}>Загружаем карту...</Text>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.backBtn}>‹</Text>
-        </TouchableOpacity>
         <Text style={styles.headerTitle}>🗺 Карта друзей</Text>
         <View style={styles.onlineBadge}>
-          <Text style={styles.onlineBadgeText}>{onlineFriends.length} онлайн</Text>
+          <Text style={styles.onlineBadgeText}>{friends.length} онлайн</Text>
         </View>
       </View>
 
-      <View style={styles.mapContainer}>
-        <View style={styles.mapBg}>
-          {[...Array(6)].map((_, i) => (
-            <View key={`h${i}`} style={[styles.gridLine, styles.gridLineH, { top: `${i * 20}%` }]} />
-          ))}
-          {[...Array(6)].map((_, i) => (
-            <View key={`v${i}`} style={[styles.gridLine, styles.gridLineV, { left: `${i * 20}%` }]} />
-          ))}
-
-          <View style={[styles.myMarker, { top: '45%', left: '45%' }]}>
-            <View style={styles.myMarkerPulse} />
-            <View style={styles.myMarkerDot} />
-            <Text style={styles.myMarkerLabel}>Ты</Text>
-          </View>
-
-          <View style={styles.radiusCircle} />
-
-          {MOCK_FRIENDS.map((friend, index) => {
-            const positions = [
-              { top: '25%', left: '60%' },
-              { top: '60%', left: '70%' },
-              { top: '70%', left: '30%' },
-              { top: '20%', left: '30%' },
-              { top: '50%', left: '80%' },
-            ];
-            const pos = positions[index];
-            return (
-              <TouchableOpacity
-                key={friend.id}
-                style={[
-                  styles.friendMarker, pos,
-                  friend.status === 'offline' && styles.friendMarkerOffline,
-                  selectedFriend?.id === friend.id && styles.friendMarkerSelected,
-                ]}
-                onPress={() => setSelectedFriend(
-                  selectedFriend?.id === friend.id ? null : friend
-                )}
-              >
-                <Text style={styles.friendMarkerEmoji}>{friend.emoji}</Text>
-                {friend.status === 'online' && <View style={styles.onlineDot} />}
-              </TouchableOpacity>
-            );
-          })}
-
-          {selectedFriend && (
-            <View style={styles.friendCard}>
-              <View style={styles.friendCardLeft}>
-                <Text style={styles.friendCardEmoji}>{selectedFriend.emoji}</Text>
-                <View>
-                  <Text style={styles.friendCardName}>{selectedFriend.name}</Text>
-                  <Text style={styles.friendCardDistance}>📍 {selectedFriend.distance}</Text>
-                  <Text style={[
-                    styles.friendCardStatus,
-                    { color: selectedFriend.status === 'online' ? '#4CAF50' : '#888' }
-                  ]}>
-                    {selectedFriend.status === 'online' ? '● Онлайн' : '● Оффлайн'}
-                  </Text>
-                </View>
+      <MapView
+        ref={mapRef}
+        style={styles.map}
+        initialRegion={{
+          latitude: location?.latitude || 43.2567,
+          longitude: location?.longitude || 76.9286,
+          latitudeDelta: 0.1,
+          longitudeDelta: 0.1,
+        }}
+        showsUserLocation={locationEnabled}
+        showsMyLocationButton={false}
+        customMapStyle={darkMapStyle}
+      >
+        {location && locationEnabled && (
+          <>
+            <Marker coordinate={location} anchor={{ x: 0.5, y: 0.5 }}>
+              <View style={styles.myMarker}>
+                <View style={styles.myMarkerDot} />
               </View>
-              <View style={styles.friendCardActions}>
-                <TouchableOpacity
-                  style={styles.friendCardBtn}
-                  onPress={() => navigation.navigate('Call', { userName: selectedFriend.name })}
-                >
-                  <Text style={styles.friendCardBtnText}>📹</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.friendCardBtn}>
-                  <Text style={styles.friendCardBtnText}>💬</Text>
-                </TouchableOpacity>
-              </View>
+            </Marker>
+            <Circle
+              center={location}
+              radius={500}
+              fillColor="rgba(108,99,255,0.1)"
+              strokeColor="rgba(108,99,255,0.3)"
+              strokeWidth={1}
+            />
+          </>
+        )}
+
+        {friends.map((friend, i) => (
+          <Marker
+            key={friend.id}
+            coordinate={{ latitude: friend.latitude, longitude: friend.longitude }}
+            onPress={() => setSelectedFriend(friend)}
+            anchor={{ x: 0.5, y: 0.5 }}
+          >
+            <View style={[styles.friendMarker, { borderColor: COLORS[i % COLORS.length] }]}>
+              <Text style={styles.friendMarkerText}>
+                {(friend.full_name || friend.username || '?')[0].toUpperCase()}
+              </Text>
+              <View style={styles.friendOnlineDot} />
             </View>
-          )}
-        </View>
-      </View>
+          </Marker>
+        ))}
+      </MapView>
 
-      <View style={styles.friendsList}>
-        <Text style={styles.friendsListTitle}>Друзья рядом</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {MOCK_FRIENDS.map((friend) => (
-            <TouchableOpacity
-              key={friend.id}
-              style={[
-                styles.friendChip,
-                friend.status === 'offline' && styles.friendChipOffline,
-                selectedFriend?.id === friend.id && styles.friendChipSelected,
-              ]}
-              onPress={() => setSelectedFriend(
-                selectedFriend?.id === friend.id ? null : friend
+      {selectedFriend && (
+        <View style={styles.friendCard}>
+          <TouchableOpacity
+            style={styles.closeFriendCard}
+            onPress={() => setSelectedFriend(null)}
+          >
+            <Ionicons name="close" size={18} color="#555" />
+          </TouchableOpacity>
+          <View style={styles.friendCardLeft}>
+            <View style={styles.friendCardAvatar}>
+              <Text style={styles.friendCardAvatarText}>
+                {(selectedFriend.full_name || selectedFriend.username || '?')[0].toUpperCase()}
+              </Text>
+            </View>
+            <View>
+              <Text style={styles.friendCardName}>
+                {selectedFriend.full_name || selectedFriend.username}
+              </Text>
+              {location && (
+                <Text style={styles.friendCardDistance}>
+                  📍 {calculateDistance(
+                    location.latitude, location.longitude,
+                    selectedFriend.latitude, selectedFriend.longitude
+                  )} от тебя
+                </Text>
               )}
+              <Text style={styles.friendCardStatus}>● Онлайн</Text>
+            </View>
+          </View>
+          <View style={styles.friendCardActions}>
+            <TouchableOpacity
+              style={styles.friendCardBtn}
+              onPress={() => navigation.navigate('Call', {
+                userName: selectedFriend.full_name || selectedFriend.username
+              })}
             >
-              <Text style={styles.friendChipEmoji}>{friend.emoji}</Text>
-              <Text style={styles.friendChipName}>{friend.name}</Text>
-              <Text style={styles.friendChipDistance}>{friend.distance}</Text>
+              <Ionicons name="videocam" size={20} color="#fff" />
             </TouchableOpacity>
-          ))}
-        </ScrollView>
-      </View>
+            <TouchableOpacity style={[styles.friendCardBtn, styles.friendCardBtnChat]}>
+              <Ionicons name="chatbubble" size={20} color="#6C63FF" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       <View style={styles.privacyBar}>
-        <Text style={styles.privacyText}>🔒 Только приблизительное расстояние</Text>
-        <View style={styles.privacyToggle}>
-          <Text style={styles.privacyToggleText}>Вкл</Text>
+        <View style={styles.privacyLeft}>
+          <Ionicons
+            name={locationEnabled ? 'location' : 'location-outline'}
+            size={18}
+            color={locationEnabled ? '#4CAF50' : '#555'}
+          />
+          <View>
+            <Text style={styles.privacyTitle}>
+              {locationEnabled ? 'Геолокация включена' : 'Геолокация выключена'}
+            </Text>
+            <Text style={styles.privacySubText}>
+              {locationEnabled ? 'Друзья видят тебя на карте' : 'Ты невидим для друзей'}
+            </Text>
+          </View>
         </View>
+        <Switch
+          value={locationEnabled}
+          onValueChange={toggleLocation}
+          trackColor={{ false: '#1A1A2E', true: '#4CAF50' }}
+          thumbColor={locationEnabled ? '#fff' : '#555'}
+        />
       </View>
+
+      {locationEnabled && location && (
+        <TouchableOpacity
+          style={styles.myLocationBtn}
+          onPress={() => mapRef.current?.animateToRegion({
+            latitude: location.latitude,
+            longitude: location.longitude,
+            latitudeDelta: 0.05,
+            longitudeDelta: 0.05,
+          }, 1000)}
+        >
+          <Ionicons name="locate" size={22} color="#6C63FF" />
+        </TouchableOpacity>
+      )}
+
+      {friends.length === 0 && locationEnabled && (
+        <View style={styles.noFriendsCard}>
+          <Text style={styles.noFriendsText}>
+            👥 Друзья пока не включили геолокацию
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
 
+const darkMapStyle = [
+  { elementType: 'geometry', stylers: [{ color: '#0d0d1a' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#746855' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#0d0d1a' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#1a1a2e' }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#111120' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0a0a1a' }] },
+  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#111120' }] },
+];
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0A0A0F' },
+  container: { flex: 1, backgroundColor: '#07070F' },
+  loadingContainer: {
+    flex: 1, backgroundColor: '#07070F',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  loadingText: { color: '#888', marginTop: 12 },
   header: {
     flexDirection: 'row', alignItems: 'center',
-    padding: 20, paddingTop: 50,
+    justifyContent: 'space-between',
+    padding: 20, paddingTop: 55,
+    backgroundColor: '#07070F',
     borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
+    zIndex: 10,
   },
-  backBtn: { fontSize: 32, color: '#6C63FF', marginRight: 12 },
-  headerTitle: { fontSize: 22, fontWeight: 'bold', color: '#fff', flex: 1 },
+  headerTitle: { fontSize: 22, fontWeight: 'bold', color: '#fff' },
   onlineBadge: {
     backgroundColor: '#1A3A1A', borderRadius: 12,
     paddingHorizontal: 10, paddingVertical: 4,
     borderWidth: 1, borderColor: '#4CAF50',
   },
   onlineBadgeText: { color: '#4CAF50', fontSize: 12, fontWeight: 'bold' },
-  mapContainer: { flex: 1 },
-  mapBg: {
-    flex: 1, backgroundColor: '#0D1117',
-    position: 'relative', overflow: 'hidden',
-  },
-  gridLine: { position: 'absolute', backgroundColor: '#1A2A1A', opacity: 0.5 },
-  gridLineH: { left: 0, right: 0, height: 1 },
-  gridLineV: { top: 0, bottom: 0, width: 1 },
-  myMarker: { position: 'absolute', alignItems: 'center' },
-  myMarkerPulse: {
-    position: 'absolute', width: 50, height: 50,
-    borderRadius: 25, backgroundColor: 'rgba(108,99,255,0.2)',
-    borderWidth: 1, borderColor: 'rgba(108,99,255,0.4)',
+  map: { flex: 1 },
+  myMarker: {
+    width: 24, height: 24, borderRadius: 12,
+    backgroundColor: 'rgba(108,99,255,0.3)',
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(108,99,255,0.5)',
   },
   myMarkerDot: {
-    width: 16, height: 16, borderRadius: 8,
+    width: 12, height: 12, borderRadius: 6,
     backgroundColor: '#6C63FF', borderWidth: 2, borderColor: '#fff',
   },
-  myMarkerLabel: { color: '#fff', fontSize: 10, marginTop: 2 },
-  radiusCircle: {
-    position: 'absolute', top: '30%', left: '30%',
-    width: 140, height: 140, borderRadius: 70,
-    borderWidth: 1, borderColor: 'rgba(108,99,255,0.2)',
-    backgroundColor: 'rgba(108,99,255,0.05)',
-  },
   friendMarker: {
-    position: 'absolute', width: 44, height: 44,
-    borderRadius: 22, backgroundColor: '#1A1A2E',
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: '#4CAF50',
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#1A1A2E', alignItems: 'center',
+    justifyContent: 'center', borderWidth: 2,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3, shadowRadius: 4, elevation: 4,
   },
-  friendMarkerOffline: { borderColor: '#555' },
-  friendMarkerSelected: { borderColor: '#6C63FF', backgroundColor: '#2A1A4E' },
-  friendMarkerEmoji: { fontSize: 20 },
-  onlineDot: {
+  friendMarkerText: { fontSize: 18, fontWeight: 'bold', color: '#fff' },
+  friendOnlineDot: {
     position: 'absolute', top: 0, right: 0,
-    width: 10, height: 10, borderRadius: 5,
-    backgroundColor: '#4CAF50', borderWidth: 1, borderColor: '#0A0A0F',
+    width: 12, height: 12, borderRadius: 6,
+    backgroundColor: '#4CAF50', borderWidth: 2, borderColor: '#1A1A2E',
   },
   friendCard: {
-    position: 'absolute', bottom: 10, left: 16, right: 16,
-    backgroundColor: 'rgba(26,26,46,0.95)',
-    borderRadius: 16, padding: 16,
-    flexDirection: 'row', alignItems: 'center',
-    borderWidth: 1, borderColor: '#6C63FF',
+    position: 'absolute', bottom: 100,
+    left: 16, right: 16,
+    backgroundColor: '#111120', borderRadius: 20,
+    padding: 16, borderWidth: 1, borderColor: '#1A1A2E',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3, shadowRadius: 10, elevation: 10,
   },
-  friendCardLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  friendCardEmoji: { fontSize: 36, marginRight: 12 },
-  friendCardName: { fontSize: 16, fontWeight: 'bold', color: '#fff' },
-  friendCardDistance: { fontSize: 13, color: '#888', marginTop: 2 },
-  friendCardStatus: { fontSize: 12, marginTop: 2 },
-  friendCardActions: { flexDirection: 'row', gap: 8 },
-  friendCardBtn: {
-    width: 44, height: 44, borderRadius: 22,
+  closeFriendCard: {
+    position: 'absolute', top: 12, right: 12,
+  },
+  friendCardLeft: {
+    flexDirection: 'row', alignItems: 'center',
+    gap: 12, marginBottom: 12,
+  },
+  friendCardAvatar: {
+    width: 50, height: 50, borderRadius: 25,
     backgroundColor: '#6C63FF', alignItems: 'center', justifyContent: 'center',
   },
-  friendCardBtnText: { fontSize: 20 },
-  friendsList: {
-    backgroundColor: '#0F0F1A', padding: 16,
-    borderTopWidth: 1, borderTopColor: '#1A1A2E',
+  friendCardAvatarText: { fontSize: 22, fontWeight: 'bold', color: '#fff' },
+  friendCardName: { fontSize: 16, fontWeight: 'bold', color: '#fff', marginBottom: 3 },
+  friendCardDistance: { fontSize: 13, color: '#888', marginBottom: 2 },
+  friendCardStatus: { fontSize: 12, color: '#4CAF50' },
+  friendCardActions: { flexDirection: 'row', gap: 10 },
+  friendCardBtn: {
+    flex: 1, backgroundColor: '#6C63FF',
+    borderRadius: 12, padding: 12,
+    alignItems: 'center', justifyContent: 'center',
   },
-  friendsListTitle: { color: '#888', fontSize: 12, fontWeight: 'bold', marginBottom: 10 },
-  friendChip: {
-    backgroundColor: '#1A1A2E', borderRadius: 16,
-    padding: 12, marginRight: 10, alignItems: 'center',
-    minWidth: 80, borderWidth: 1, borderColor: '#2A2A3E',
-  },
-  friendChipOffline: { opacity: 0.5 },
-  friendChipSelected: { borderColor: '#6C63FF', backgroundColor: '#1A1A3E' },
-  friendChipEmoji: { fontSize: 24, marginBottom: 4 },
-  friendChipName: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
-  friendChipDistance: { color: '#6C63FF', fontSize: 10, marginTop: 2 },
+  friendCardBtnChat: { backgroundColor: '#1A1A2E' },
   privacyBar: {
     flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between', padding: 12,
-    backgroundColor: '#0A0A0F',
+    justifyContent: 'space-between',
+    backgroundColor: '#111120', padding: 16,
     borderTopWidth: 1, borderTopColor: '#1A1A2E',
+    gap: 12,
   },
-  privacyText: { color: '#888', fontSize: 12 },
-  privacyToggle: {
-    backgroundColor: '#1A3A1A', borderRadius: 8,
-    paddingHorizontal: 12, paddingVertical: 4,
+  privacyLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  privacyTitle: { fontSize: 14, fontWeight: '600', color: '#fff' },
+  privacySubText: { fontSize: 11, color: '#555', marginTop: 2 },
+  myLocationBtn: {
+    position: 'absolute', right: 16, bottom: 110,
+    width: 46, height: 46, borderRadius: 23,
+    backgroundColor: '#111120', alignItems: 'center',
+    justifyContent: 'center', borderWidth: 1, borderColor: '#1A1A2E',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3, shadowRadius: 6, elevation: 6,
   },
-  privacyToggleText: { color: '#4CAF50', fontSize: 12, fontWeight: 'bold' },
+  noFriendsCard: {
+    position: 'absolute', top: 100, alignSelf: 'center',
+    backgroundColor: 'rgba(17,17,32,0.9)',
+    borderRadius: 14, padding: 12,
+    borderWidth: 1, borderColor: '#1A1A2E',
+  },
+  noFriendsText: { color: '#888', fontSize: 13 },
 });

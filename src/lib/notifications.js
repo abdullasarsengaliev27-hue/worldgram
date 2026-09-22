@@ -1,7 +1,6 @@
 import * as Notifications from 'expo-notifications';
-import { Platform } from 'react-native';
+import { supabase } from './supabase';
 
-// Настройка как показывать уведомления
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
     shouldShowAlert: true,
@@ -10,7 +9,7 @@ Notifications.setNotificationHandler({
   }),
 });
 
-// Запросить разрешение и получить токен
+// Регистрация и сохранение токена в Supabase
 export async function registerForPushNotifications() {
   try {
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
@@ -21,13 +20,19 @@ export async function registerForPushNotifications() {
       finalStatus = status;
     }
 
-    if (finalStatus !== 'granted') {
-      return null;
-    }
+    if (finalStatus !== 'granted') return null;
 
     const token = await Notifications.getExpoPushTokenAsync({
-      projectId: 'worldgram',
+      projectId: 'c998e22e-a15e-4367-81ac-f4258af82aad',
     });
+
+    // Сохраняем токен в профиль
+    const { data: { user } } = await supabase.auth.getUser();
+    if (user && token.data) {
+      await supabase.from('profiles').update({
+        push_token: token.data,
+      }).eq('id', user.id);
+    }
 
     return token.data;
   } catch (error) {
@@ -39,13 +44,8 @@ export async function registerForPushNotifications() {
 // Показать локальное уведомление
 export async function showLocalNotification(title, body, data = {}) {
   await Notifications.scheduleNotificationAsync({
-    content: {
-      title,
-      body,
-      data,
-      sound: true,
-    },
-    trigger: null, // показать сразу
+    content: { title, body, data, sound: true },
+    trigger: null,
   });
 }
 
@@ -67,7 +67,7 @@ export async function notifyNewMessage(senderName, message) {
 // Уведомление о звонке
 export async function notifyIncomingCall(callerName) {
   await showLocalNotification(
-    `📹 Входящий звонок`,
+    '📹 Входящий звонок',
     `${callerName} звонит тебе...`,
     { type: 'call', callerName }
   );
@@ -76,8 +76,39 @@ export async function notifyIncomingCall(callerName) {
 // Уведомление о достижении
 export async function notifyAchievement(title, points) {
   await showLocalNotification(
-    `🏆 Новое достижение!`,
+    '🏆 Новое достижение!',
     `${title} — +${points} очков`,
     { type: 'achievement' }
   );
+}
+
+// Отправить push уведомление другому пользователю через Expo
+export async function sendPushToUser(receiverId, title, body, data = {}) {
+  try {
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('push_token')
+      .eq('id', receiverId)
+      .single();
+
+    if (!profile?.push_token) return;
+
+    await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify({
+        to: profile.push_token,
+        title,
+        body,
+        data,
+        sound: 'default',
+        badge: 1,
+      }),
+    });
+  } catch (error) {
+    console.log('Push send error:', error);
+  }
 }

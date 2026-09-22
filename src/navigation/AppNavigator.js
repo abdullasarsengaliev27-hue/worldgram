@@ -3,7 +3,6 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
-
 import SplashScreen from '../screens/SplashScreen';
 import LoginScreen from '../screens/LoginScreen';
 import RegisterScreen from '../screens/RegisterScreen';
@@ -14,12 +13,20 @@ import CallScreen from '../screens/CallScreen';
 import SummaryScreen from '../screens/SummaryScreen';
 import AchievementsScreen from '../screens/AchievementsScreen';
 import FriendsMapScreen from '../screens/FriendsMapScreen';
-
 import OnboardingScreen from '../screens/OnboardingScreen';
 import TranslateScreen from '../screens/TranslateScreen';
 import EditProfileScreen from '../screens/EditProfileScreen';
 import CreateGroupScreen from '../screens/CreateGroupScreen';
 import StoriesScreen from '../screens/StoriesScreen';
+import PrivacyScreen from '../screens/PrivacyScreen';
+import TermsScreen from '../screens/TermsScreen';
+import UserProfileScreen from '../screens/UserProfileScreen';
+import SettingsScreen from '../screens/SettingsScreen';
+import HelpScreen from '../screens/HelpScreen';
+import CallSummariesScreen from '../screens/CallSummariesScreen';
+import GroupInfoScreen from '../screens/GroupInfoScreen';
+import ChatBackgroundScreen from '../screens/ChatBackgroundScreen';
+import ContactsScreen from '../screens/ContactsScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -65,7 +72,22 @@ function MainTabs() {
         component={ProfileScreen}
         options={{ tabBarLabel: 'Профиль' }}
       />
+      <Tab.Screen
+  name="Contacts"
+  component={ContactsScreen}
+  options={{
+    tabBarLabel: 'Контакты',
+    tabBarIcon: ({ focused, color, size }) => (
+      <Ionicons
+        name={focused ? 'people' : 'people-outline'}
+        size={size} color={color}
+      />
+    ),
+  }}
+/>
     </Tab.Navigator>
+
+    
   );
 }
 
@@ -89,6 +111,15 @@ export default function AppNavigator() {
         <Stack.Screen name="EditProfile" component={EditProfileScreen} />
         <Stack.Screen name="CreateGroup" component={CreateGroupScreen} />
         <Stack.Screen name="Stories" component={StoriesScreen} />
+        <Stack.Screen name="Privacy" component={PrivacyScreen} />
+<Stack.Screen name="Terms" component={TermsScreen} />
+<Stack.Screen name="UserProfile" component={UserProfileScreen} />
+<Stack.Screen name="Settings" component={SettingsScreen} />
+<Stack.Screen name="Help" component={HelpScreen} />
+<Stack.Screen name="CallSummaries" component={CallSummariesScreen} />
+<Stack.Screen name="GroupInfo" component={GroupInfoScreen} />
+<Stack.Screen name="ChatBackground" component={ChatBackgroundScreen} />
+<Stack.Screen name="Contacts" component={ContactsScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

@@ -114,6 +114,17 @@ export default function RegisterScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
+        <View style={styles.termsRow}>
+  <Text style={styles.termsText}>Регистрируясь, ты принимаешь </Text>
+  <TouchableOpacity onPress={() => navigation.navigate('Terms')}>
+    <Text style={styles.termsLink}>Условия</Text>
+  </TouchableOpacity>
+  <Text style={styles.termsText}> и </Text>
+  <TouchableOpacity onPress={() => navigation.navigate('Privacy')}>
+    <Text style={styles.termsLink}>Политику</Text>
+  </TouchableOpacity>
+</View>
+
         <TouchableOpacity
           style={styles.loginLink}
           onPress={() => navigation.navigate('Login')}
@@ -125,6 +136,8 @@ export default function RegisterScreen({ navigation }) {
     </KeyboardAvoidingView>
   );
 }
+
+
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#07070F' },
@@ -171,4 +184,11 @@ const styles = StyleSheet.create({
   loginLink: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center' },
   loginText: { color: '#555', fontSize: 14 },
   loginLinkText: { color: '#6C63FF', fontSize: 14, fontWeight: '600' },
+  termsRow: {
+    flexDirection: 'row', alignItems: 'center',
+    flexWrap: 'wrap', justifyContent: 'center',
+    marginTop: 16,
+  },
+  termsText: { color: '#555', fontSize: 12 },
+  termsLink: { color: '#6C63FF', fontSize: 12, fontWeight: '600' },
 });
