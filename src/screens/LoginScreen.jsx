@@ -32,11 +32,29 @@ export default function LoginScreen({ navigation }) {
       return;
     }
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password
+    });
     setLoading(false);
+  
     if (error) {
       shake();
-      Alert.alert('Ошибка', error.message);
+      if (error.message.includes('Email not confirmed')) {
+        Alert.alert(
+          '📧 Подтверди email',
+          'Проверь почту и нажми на ссылку подтверждения',
+          [
+            { text: 'Отправить снова', onPress: async () => {
+              await supabase.auth.resend({ type: 'signup', email: email.trim() });
+              Alert.alert('✅', 'Письмо отправлено!');
+            }},
+            { text: 'OK' }
+          ]
+        );
+      } else {
+        Alert.alert('Ошибка', error.message);
+      }
     } else {
       navigation.replace('Main');
     }

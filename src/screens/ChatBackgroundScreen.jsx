@@ -111,7 +111,11 @@ export default function ChatBackgroundScreen({ route, navigation }) {
       chat_background: selected,
     }).eq('id', chatId);
     setSaving(false);
-    navigation.goBack();
+    // Передаём выбранный фон обратно
+    navigation.navigate('Chat', {
+      ...route.params,
+      chatBackground: selected,
+    });
   };
 
   const PreviewChat = ({ bg }) => (

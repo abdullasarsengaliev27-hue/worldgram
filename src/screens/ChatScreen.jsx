@@ -39,7 +39,7 @@ export default function ChatScreen({ route, navigation }) {
     fetchMessages();
     loadSuggestions();
     loadBackground();
-
+  
     const subscription = supabase
       .channel(`chat-${chatId}`)
       .on('postgres_changes', {
@@ -56,9 +56,15 @@ export default function ChatScreen({ route, navigation }) {
         }, 100);
       })
       .subscribe();
-
+  
     return () => supabase.removeChannel(subscription);
   }, [chatId]);
+
+  useEffect(() => {
+    if (route.params?.chatBackground) {
+      setChatBackground(route.params.chatBackground);
+    }
+  }, [route.params?.chatBackground]);
 
   const loadBackground = async () => {
     const { data } = await supabase
