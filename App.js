@@ -12,13 +12,15 @@ export default function App() {
   useEffect(() => {
     registerForPushNotifications();
 
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        userIdRef.current = user.id;
-        startPresence(user.id);
+    // Получаем текущую сессию
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        userIdRef.current = session.user.id;
+        startPresence(session.user.id);
       }
     });
 
+    // Слушаем изменения авторизации
     const { data } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_IN' && session?.user) {
         userIdRef.current = session.user.id;
@@ -28,6 +30,9 @@ export default function App() {
           stopPresence(userIdRef.current);
           userIdRef.current = null;
         }
+      } else if (event === 'TOKEN_REFRESHED') {
+        // Токен обновился — сессия активна
+        console.log('Сессия обновлена');
       }
     });
 

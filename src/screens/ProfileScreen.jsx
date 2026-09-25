@@ -21,13 +21,14 @@ export default function ProfileScreen({ navigation }) {
     if (user) {
       const { data } = await supabase
         .from('profiles').select('*').eq('id', user.id).single();
-      if (data) {
-        setProfile({
-          ...data,
-          full_name: data.full_name || user.user_metadata?.full_name || user.email,
-          username: data.username || user.email,
-        });
-      }
+        if (data) {
+          setProfile({
+            ...data,
+            full_name: data.full_name || user.user_metadata?.full_name || user.email,
+            username: data.username || user.email,
+            avatar_url: data.avatar_url || null, // ← добавь это
+          });
+        }
     }
     setLoading(false);
   };
@@ -118,15 +119,18 @@ export default function ProfileScreen({ navigation }) {
 
         {/* Аватар */}
         <View style={styles.avatarContainer}>
-          {profile?.avatar_url ? (
-            <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
-          ) : (
-            <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
-              <Text style={styles.avatarEmoji}>{avatarEmoji}</Text>
-            </View>
-          )}
-          <View style={styles.onlineBadge} />
-        </View>
+  {profile?.avatar_url ? (
+    <Image
+      source={{ uri: profile.avatar_url }}
+      style={styles.avatarImage}
+    />
+  ) : (
+    <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
+      <Text style={styles.avatarEmoji}>{avatarEmoji}</Text>
+    </View>
+  )}
+  <View style={styles.onlineBadge} />
+</View>
 
         {/* Имя */}
         <Text style={styles.name}>{displayName}</Text>
@@ -222,6 +226,11 @@ const styles = StyleSheet.create({
   },
   avatarImage: {
     width: 90, height: 90, borderRadius: 45,
+  },
+  avatarImage: {
+    width: 90, height: 90, borderRadius: 45,
+    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6, shadowRadius: 20, elevation: 20,
   },
   avatarEmoji: { fontSize: 44 },
   onlineBadge: {

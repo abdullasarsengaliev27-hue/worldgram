@@ -22,19 +22,17 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     getCurrentUser();
     Notifications.setBadgeCountAsync(0);
-
-    const subscription = supabase
-      .channel('profiles-online')
-      .on('postgres_changes', {
-        event: 'UPDATE', schema: 'public', table: 'profiles',
-      }, (payload) => {
-        setUsers(prev => prev.map(u =>
-          u.id === payload.new.id ? { ...u, ...payload.new } : u
-        ));
-      })
-      .subscribe();
-
-    return () => subscription.unsubscribe();
+    const channelName = `profiles-online-${Date.now()}`;
+const subscription = supabase
+  .channel(channelName)
+  .on('postgres_changes', {
+    event: 'UPDATE', schema: 'public', table: 'profiles',
+  }, (payload) => {
+    setUsers(prev => prev.map(u =>
+      u.id === payload.new.id ? { ...u, ...payload.new } : u
+    ));
+  }).subscribe();
+return () => supabase.removeChannel(subscription);
   }, []);
 
   const getCurrentUser = async () => {
@@ -56,8 +54,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const fetchUsers = async (myId) => {
-    const { data } = await supabase
-      .from('profiles').select('*').neq('id', myId);
+    const { data } = await supabase.from('profiles').select('*').neq('id', myId);
     if (data) setUsers(data);
     setLoading(false);
   };
@@ -90,7 +87,6 @@ export default function HomeScreen({ navigation }) {
         .from('chat_members').select('chat_id').eq('user_id', user.id);
       const myChatsIds = existingChats?.map(c => c.chat_id) || [];
       let chatId = null;
-
       if (myChatsIds.length > 0) {
         const { data: sharedChat } = await supabase
           .from('chat_members').select('chat_id')
@@ -98,7 +94,6 @@ export default function HomeScreen({ navigation }) {
           .in('chat_id', myChatsIds).limit(1);
         if (sharedChat?.length > 0) chatId = sharedChat[0].chat_id;
       }
-
       if (!chatId) {
         const { data: newChat } = await supabase
           .from('chats').insert({}).select().single();
@@ -108,7 +103,6 @@ export default function HomeScreen({ navigation }) {
           { chat_id: chatId, user_id: otherUser.id }
         ]);
       }
-
       navigation.navigate('Chat', {
         chatId,
         userName: otherUser.full_name || otherUser.username,
@@ -119,7 +113,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const deleteChat = async (otherUserId) => {
-    Alert.alert('Удалить чат?', 'Сообщения будут удалены', [
+    Alert.alert('Удалить чат?', '', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Удалить', style: 'destructive',
@@ -142,7 +136,7 @@ export default function HomeScreen({ navigation }) {
               }
             }
             getCurrentUser();
-          } catch (e) { Alert.alert('Ошибка', e.message); }
+          } catch (e) { }
         }
       }
     ]);
@@ -164,7 +158,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const deleteGroup = async (groupId) => {
-    Alert.alert('Удалить группу?', 'Группа будет удалена для всех', [
+    Alert.alert('Удалить группу?', '', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Удалить', style: 'destructive',
@@ -187,7 +181,7 @@ export default function HomeScreen({ navigation }) {
     return acc;
   }, []);
 
-  const onlineUsers = users.filter(u => u.is_online);
+  const onlineCount = users.filter(u => u.is_online).length;
 
   const filteredUsers = users.filter(u => {
     const name = (u.full_name || u.username || '').toLowerCase();
@@ -197,6 +191,9 @@ export default function HomeScreen({ navigation }) {
   const filteredGroups = groupChats.filter(g =>
     (g.group_name || '').toLowerCase().includes(search.toLowerCase())
   );
+
+  const showUsers = activeTab === 'all' || activeTab === 'users';
+  const showGroups = activeTab === 'all' || activeTab === 'groups';
 
   return (
     <View style={styles.container}>
@@ -209,27 +206,36 @@ export default function HomeScreen({ navigation }) {
           <Text style={styles.headerTitle}>Worldgram</Text>
         </View>
         <View style={styles.headerRight}>
-          <View style={styles.onlineIndicator}>
-            <View style={styles.onlineDotHeader} />
-            <Text style={styles.onlineCount}>{onlineUsers.length} онлайн</Text>
-          </View>
-          <TouchableOpacity style={styles.headerBtn}>
+          {onlineCount > 0 && (
+            <View style={styles.onlinePill}>
+              <View style={styles.onlinePillDot} />
+              <Text style={styles.onlinePillText}>{onlineCount} онлайн</Text>
+            </View>
+          )}
+          <TouchableOpacity style={styles.notifBtn}>
             <Ionicons name="notifications-outline" size={22} color="#6C63FF" />
           </TouchableOpacity>
         </View>
       </View>
 
       {/* Stories */}
-      <View style={styles.storiesContainer}>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      <View style={styles.storiesWrapper}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.storiesContent}
+        >
+          {/* Добавить историю */}
           <TouchableOpacity
             style={styles.storyItem}
             onPress={() => navigation.navigate('Stories')}
           >
-            <View style={styles.addStoryCircle}>
-              <Ionicons name="add" size={24} color="#6C63FF" />
+            <View style={styles.addStoryRing}>
+              <View style={styles.addStoryInner}>
+                <Ionicons name="add" size={22} color="#6C63FF" />
+              </View>
             </View>
-            <Text style={styles.storyName}>Моя история</Text>
+            <Text style={styles.storyLabel}>Моя история</Text>
           </TouchableOpacity>
 
           {storyUsers.map((story, i) => (
@@ -238,12 +244,12 @@ export default function HomeScreen({ navigation }) {
               style={styles.storyItem}
               onPress={() => navigation.navigate('Stories')}
             >
-              <View style={[styles.storyCircle, { borderColor: COLORS[i % COLORS.length] }]}>
-                <View style={[styles.storyCircleInner, { backgroundColor: story.background_color }]}>
-                  <Text style={styles.storyCircleEmoji}>{story.emoji}</Text>
+              <View style={[styles.storyRing, { borderColor: COLORS[i % COLORS.length] }]}>
+                <View style={[styles.storyInner, { backgroundColor: story.background_color }]}>
+                  <Text style={styles.storyEmoji}>{story.emoji}</Text>
                 </View>
               </View>
-              <Text style={styles.storyName} numberOfLines={1}>
+              <Text style={styles.storyLabel} numberOfLines={1}>
                 {story.profiles?.full_name?.split(' ')[0] || 'Друг'}
               </Text>
             </TouchableOpacity>
@@ -252,24 +258,26 @@ export default function HomeScreen({ navigation }) {
       </View>
 
       {/* Search */}
-      <View style={styles.searchContainer}>
-        <Ionicons name="search" size={16} color="#555" />
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Поиск..."
-          placeholderTextColor="#555"
-          value={search}
-          onChangeText={setSearch}
-        />
-        {search.length > 0 && (
-          <TouchableOpacity onPress={() => setSearch('')}>
-            <Ionicons name="close-circle" size={16} color="#555" />
-          </TouchableOpacity>
-        )}
+      <View style={styles.searchRow}>
+        <View style={styles.searchBox}>
+          <Ionicons name="search" size={16} color="#555" />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Поиск..."
+            placeholderTextColor="#555"
+            value={search}
+            onChangeText={setSearch}
+          />
+          {search.length > 0 && (
+            <TouchableOpacity onPress={() => setSearch('')}>
+              <Ionicons name="close-circle" size={16} color="#555" />
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {/* Tabs */}
-      <View style={styles.tabs}>
+      <View style={styles.tabsRow}>
         {[
           { id: 'all', label: 'Все' },
           { id: 'users', label: 'Люди' },
@@ -292,72 +300,69 @@ export default function HomeScreen({ navigation }) {
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6C63FF" />
         }
+        contentContainerStyle={styles.listContent}
       >
         {/* Группы */}
-        {(activeTab === 'all' || activeTab === 'groups') && filteredGroups.length > 0 && (
+        {showGroups && filteredGroups.length > 0 && (
           <View style={styles.section}>
-            <Text style={styles.sectionLabel}>👥 Группы</Text>
+            <Text style={styles.sectionLabel}>Группы</Text>
             {filteredGroups.map((group) => (
               <TouchableOpacity
                 key={group.id}
-                style={styles.groupCard}
+                style={styles.chatCard}
                 onPress={() => navigation.navigate('Chat', {
                   chatId: group.id,
                   userName: group.group_name,
                   isGroup: true,
                   groupAvatar: group.group_avatar,
                 })}
-                onLongPress={() => {
-                  Alert.alert(group.group_name, 'Управление группой', [
-                    { text: 'Отмена', style: 'cancel' },
-                    { text: 'ℹ️ Информация', onPress: () => navigation.navigate('GroupInfo', {
-                      chatId: group.id,
-                      groupName: group.group_name,
-                      groupAvatar: group.group_avatar,
-                    })},
-                    { text: '🚪 Выйти', onPress: () => leaveGroup(group.id) },
-                    { text: '🗑 Удалить', style: 'destructive', onPress: () => deleteGroup(group.id) },
-                  ]);
-                }}
+                onLongPress={() => Alert.alert(group.group_name, '', [
+                  { text: 'Отмена', style: 'cancel' },
+                  { text: 'ℹ️ Информация', onPress: () => navigation.navigate('GroupInfo', {
+                    chatId: group.id, groupName: group.group_name, groupAvatar: group.group_avatar,
+                  })},
+                  { text: '🚪 Выйти', onPress: () => leaveGroup(group.id) },
+                  { text: '🗑 Удалить', style: 'destructive', onPress: () => deleteGroup(group.id) },
+                ])}
+                activeOpacity={0.7}
               >
                 <View style={styles.groupAvatarCircle}>
                   <Text style={styles.groupAvatarEmoji}>{group.group_avatar || '👥'}</Text>
                 </View>
                 <View style={styles.chatInfo}>
                   <Text style={styles.chatName}>{group.group_name}</Text>
-                  <Text style={styles.chatSub}>Групповой чат • Зажми для управления</Text>
+                  <Text style={styles.chatSub}>Групповой чат</Text>
                 </View>
-                <Ionicons name="chevron-forward" size={16} color="#333" />
+                <Ionicons name="chevron-forward" size={16} color="#2A2A3E" />
               </TouchableOpacity>
             ))}
           </View>
         )}
 
         {/* Пользователи */}
-        {(activeTab === 'all' || activeTab === 'users') && (
+        {showUsers && (
           <View style={styles.section}>
-            {(activeTab === 'all' || activeTab === 'users') && (
-              <Text style={styles.sectionLabel}>💬 Люди</Text>
+            {activeTab !== 'users' && filteredGroups.length > 0 && (
+              <Text style={styles.sectionLabel}>Люди</Text>
             )}
             {loading ? (
-              <View style={styles.loadingContainer}>
-                <ActivityIndicator size="large" color="#6C63FF" />
+              <View style={styles.loadingBox}>
+                <ActivityIndicator color="#6C63FF" />
               </View>
             ) : filteredUsers.length === 0 ? (
-              <View style={styles.emptyContainer}>
+              <View style={styles.emptyBox}>
                 <Text style={styles.emptyEmoji}>👥</Text>
-                <Text style={styles.emptyText}>Пока нет пользователей</Text>
-                <Text style={styles.emptySubText}>Зарегистрируй друга!</Text>
+                <Text style={styles.emptyTitle}>Нет пользователей</Text>
+                <Text style={styles.emptySub}>Зарегистрируй друга!</Text>
               </View>
             ) : (
               filteredUsers.map((item, index) => (
                 <TouchableOpacity
                   key={item.id}
-                  style={styles.userCard}
+                  style={styles.chatCard}
                   onPress={() => openChat(item)}
                   onLongPress={() => Alert.alert(
-                    item.full_name || item.username,
-                    'Действия',
+                    item.full_name || item.username, '',
                     [
                       { text: 'Отмена', style: 'cancel' },
                       { text: '👤 Профиль', onPress: () => navigation.navigate('UserProfile', { userId: item.id }) },
@@ -370,42 +375,42 @@ export default function HomeScreen({ navigation }) {
                     onPress={() => navigation.navigate('UserProfile', { userId: item.id })}
                   >
                     {item.avatar_url ? (
-                      <Image source={{ uri: item.avatar_url }} style={styles.avatarImage} />
+                      <Image source={{ uri: item.avatar_url }} style={styles.userAvatar} />
                     ) : (
-                      <View style={[styles.avatar, { backgroundColor: getColor(index) }]}>
-                        <Text style={styles.avatarText}>
+                      <View style={[styles.userAvatar, { backgroundColor: getColor(index) }]}>
+                        <Text style={styles.userAvatarText}>
                           {(item.full_name || item.username || '?')[0].toUpperCase()}
                         </Text>
-                        <View style={[styles.onlineDot, {
-                          backgroundColor: item.is_online ? '#4CAF50' : '#444'
-                        }]} />
                       </View>
                     )}
+                    <View style={[styles.statusDot, {
+                      backgroundColor: item.is_online ? '#4CAF50' : '#2A2A3E'
+                    }]} />
                   </TouchableOpacity>
 
-                  <View style={styles.userInfo}>
-                    <Text style={styles.userName}>
+                  <View style={styles.chatInfo}>
+                    <Text style={styles.chatName}>
                       {item.full_name || item.username || 'Пользователь'}
                     </Text>
-                    <Text style={[styles.userStatus, {
-                      color: item.is_online ? '#4CAF50' : '#555'
+                    <Text style={[styles.chatSub, {
+                      color: item.is_online ? '#4CAF50' : '#444'
                     }]}>
                       {item.is_online ? '● Онлайн' : `● ${formatLastSeen(item.last_seen)}`}
                     </Text>
                   </View>
 
-                  <View style={styles.userActions}>
+                  <View style={styles.chatActions}>
                     <TouchableOpacity
-                      style={styles.actionBtn}
+                      style={styles.actionCircle}
                       onPress={() => navigation.navigate('Call', { userName: item.full_name || item.username })}
                     >
-                      <Ionicons name="videocam" size={16} color="#6C63FF" />
+                      <Ionicons name="videocam" size={15} color="#6C63FF" />
                     </TouchableOpacity>
                     <TouchableOpacity
-                      style={[styles.actionBtn, styles.actionBtnPrimary]}
+                      style={[styles.actionCircle, styles.actionCirclePrimary]}
                       onPress={() => openChat(item)}
                     >
-                      <Ionicons name="chatbubble" size={16} color="#fff" />
+                      <Ionicons name="chatbubble" size={15} color="#fff" />
                     </TouchableOpacity>
                   </View>
                 </TouchableOpacity>
@@ -414,148 +419,164 @@ export default function HomeScreen({ navigation }) {
           </View>
         )}
 
-        <View style={{ height: 100 }} />
+        <View style={{ height: 90 }} />
       </ScrollView>
 
       {/* FAB */}
       <TouchableOpacity
         style={styles.fab}
         onPress={() => navigation.navigate('CreateGroup')}
-        activeOpacity={0.8}
+        activeOpacity={0.85}
       >
-        <Ionicons name="people" size={20} color="#fff" />
-        <Text style={styles.fabText}>Группа</Text>
+        <Ionicons name="people" size={24} color="#fff" />
       </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#07070F' },
+  container: { flex: 1, backgroundColor: '#080810' },
+
+  // Header
   header: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', paddingHorizontal: 20, paddingTop: 55, paddingBottom: 12,
+    alignItems: 'center', paddingHorizontal: 20,
+    paddingTop: 56, paddingBottom: 14,
   },
-  headerGreeting: { fontSize: 13, color: '#6C63FF', fontWeight: '600' },
-  headerTitle: { fontSize: 26, fontWeight: 'bold', color: '#fff', marginTop: 2 },
+  headerGreeting: { fontSize: 12, color: '#6C63FF', fontWeight: '700', letterSpacing: 0.5 },
+  headerTitle: { fontSize: 28, fontWeight: '800', color: '#fff', marginTop: 2 },
   headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  onlineIndicator: {
+  onlinePill: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: '#0D1A0D', borderRadius: 10,
-    paddingHorizontal: 8, paddingVertical: 4,
-    borderWidth: 1, borderColor: '#1A3A1A',
+    backgroundColor: 'rgba(76,175,80,0.12)',
+    borderRadius: 20, paddingHorizontal: 10, paddingVertical: 5,
+    borderWidth: 1, borderColor: 'rgba(76,175,80,0.25)',
   },
-  onlineDotHeader: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4CAF50' },
-  onlineCount: { color: '#4CAF50', fontSize: 11, fontWeight: '600' },
-  headerBtn: {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: '#1A1A2E', alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1, borderColor: '#2A2A3E',
+  onlinePillDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4CAF50' },
+  onlinePillText: { color: '#4CAF50', fontSize: 12, fontWeight: '700' },
+  notifBtn: {
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: '#111122', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#1E1E32',
   },
-  storiesContainer: {
-    paddingVertical: 10, paddingLeft: 16,
-    borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
+
+  // Stories
+  storiesWrapper: {
+    borderBottomWidth: 1, borderBottomColor: '#111122',
+    paddingBottom: 12,
   },
-  storyItem: { alignItems: 'center', marginRight: 12, width: 64 },
-  addStoryCircle: {
-    width: 58, height: 58, borderRadius: 29,
-    backgroundColor: '#111120', alignItems: 'center',
-    justifyContent: 'center', marginBottom: 5,
-    borderWidth: 2, borderColor: '#6C63FF', borderStyle: 'dashed',
+  storiesContent: { paddingHorizontal: 16, gap: 2 },
+  storyItem: { alignItems: 'center', marginRight: 14, width: 66 },
+  addStoryRing: {
+    width: 60, height: 60, borderRadius: 30,
+    borderWidth: 1.5, borderColor: '#6C63FF',
+    borderStyle: 'dashed', padding: 3,
+    marginBottom: 6,
   },
-  storyCircle: {
-    width: 58, height: 58, borderRadius: 29,
-    borderWidth: 2, padding: 2, marginBottom: 5,
-  },
-  storyCircleInner: {
-    flex: 1, borderRadius: 25,
+  addStoryInner: {
+    flex: 1, borderRadius: 27,
+    backgroundColor: '#111122',
     alignItems: 'center', justifyContent: 'center',
   },
-  storyCircleEmoji: { fontSize: 24 },
-  storyName: { fontSize: 10, color: '#666', textAlign: 'center', width: 60 },
-  searchContainer: {
+  storyRing: {
+    width: 60, height: 60, borderRadius: 30,
+    borderWidth: 2, padding: 2, marginBottom: 6,
+  },
+  storyInner: {
+    flex: 1, borderRadius: 26,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  storyEmoji: { fontSize: 24 },
+  storyLabel: { fontSize: 10, color: '#666', textAlign: 'center', width: 62 },
+
+  // Search
+  searchRow: { paddingHorizontal: 16, paddingVertical: 10 },
+  searchBox: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
-    backgroundColor: '#111120', borderRadius: 12,
-    marginHorizontal: 16, marginTop: 10, marginBottom: 8,
-    paddingHorizontal: 12, paddingVertical: 10,
-    borderWidth: 1, borderColor: '#1A1A2E',
+    backgroundColor: '#111122', borderRadius: 14,
+    paddingHorizontal: 14, paddingVertical: 11,
+    borderWidth: 1, borderColor: '#1E1E32',
   },
   searchInput: { flex: 1, color: '#fff', fontSize: 14 },
-  tabs: {
+
+  // Tabs
+  tabsRow: {
     flexDirection: 'row', marginHorizontal: 16,
-    marginBottom: 8, backgroundColor: '#111120',
+    marginBottom: 6, backgroundColor: '#111122',
     borderRadius: 12, padding: 3,
-    borderWidth: 1, borderColor: '#1A1A2E',
+    borderWidth: 1, borderColor: '#1E1E32',
   },
-  tab: {
-    flex: 1, paddingVertical: 8, borderRadius: 10,
-    alignItems: 'center',
-  },
+  tab: { flex: 1, paddingVertical: 8, borderRadius: 10, alignItems: 'center' },
   tabActive: { backgroundColor: '#6C63FF' },
-  tabText: { color: '#555', fontSize: 13, fontWeight: '600' },
+  tabText: { color: '#444', fontSize: 13, fontWeight: '600' },
   tabTextActive: { color: '#fff' },
-  section: { paddingHorizontal: 16, marginBottom: 8 },
+
+  // List
+  listContent: { paddingHorizontal: 16 },
+  section: { marginBottom: 8 },
   sectionLabel: {
-    fontSize: 13, fontWeight: 'bold', color: '#555',
-    marginBottom: 8, marginTop: 4,
+    fontSize: 12, fontWeight: '700', color: '#444',
+    marginBottom: 8, marginTop: 8, letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
-  groupCard: {
+
+  // Chat Card
+  chatCard: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#111120', borderRadius: 16,
+    backgroundColor: '#111122', borderRadius: 18,
     padding: 12, marginBottom: 8,
-    borderWidth: 1, borderColor: '#1A1A2E', gap: 12,
+    borderWidth: 1, borderColor: '#1A1A2E',
+    gap: 12,
   },
+
+  // Group avatar
   groupAvatarCircle: {
-    width: 48, height: 48, borderRadius: 24,
+    width: 50, height: 50, borderRadius: 25,
     backgroundColor: '#1A1A2E', alignItems: 'center',
-    justifyContent: 'center', borderWidth: 1, borderColor: '#6C63FF',
+    justifyContent: 'center', borderWidth: 1.5, borderColor: '#6C63FF22',
   },
   groupAvatarEmoji: { fontSize: 24 },
-  chatInfo: { flex: 1 },
-  chatName: { fontSize: 15, fontWeight: 'bold', color: '#fff', marginBottom: 3 },
-  chatSub: { fontSize: 11, color: '#555' },
-  userCard: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: '#111120', borderRadius: 16,
-    padding: 12, marginBottom: 8,
-    borderWidth: 1, borderColor: '#1A1A2E',
-  },
-  avatar: {
+
+  // User avatar
+  userAvatar: {
     width: 50, height: 50, borderRadius: 25,
     alignItems: 'center', justifyContent: 'center',
-    marginRight: 12, position: 'relative',
+    position: 'relative',
   },
-  avatarImage: {
-    width: 50, height: 50, borderRadius: 25, marginRight: 12,
-  },
-  avatarText: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
-  onlineDot: {
+  userAvatarText: { fontSize: 20, fontWeight: '700', color: '#fff' },
+  statusDot: {
     position: 'absolute', bottom: 1, right: 1,
-    width: 11, height: 11, borderRadius: 6,
-    borderWidth: 2, borderColor: '#111120',
+    width: 12, height: 12, borderRadius: 6,
+    borderWidth: 2, borderColor: '#111122',
   },
-  userInfo: { flex: 1 },
-  userName: { fontSize: 15, fontWeight: '700', color: '#fff', marginBottom: 3 },
-  userStatus: { fontSize: 12 },
-  userActions: { flexDirection: 'row', gap: 6 },
-  actionBtn: {
+
+  // Chat info
+  chatInfo: { flex: 1 },
+  chatName: { fontSize: 15, fontWeight: '700', color: '#fff', marginBottom: 3 },
+  chatSub: { fontSize: 12, color: '#444' },
+
+  // Actions
+  chatActions: { flexDirection: 'row', gap: 6 },
+  actionCircle: {
     width: 34, height: 34, borderRadius: 17,
     backgroundColor: '#1A1A2E', alignItems: 'center',
     justifyContent: 'center', borderWidth: 1, borderColor: '#2A2A3E',
   },
-  actionBtnPrimary: { backgroundColor: '#6C63FF', borderColor: '#6C63FF' },
-  loadingContainer: { alignItems: 'center', padding: 40 },
-  emptyContainer: { alignItems: 'center', padding: 40 },
-  emptyEmoji: { fontSize: 40, marginBottom: 12 },
-  emptyText: { fontSize: 16, fontWeight: 'bold', color: '#fff', marginBottom: 6 },
-  emptySubText: { fontSize: 13, color: '#555' },
+  actionCirclePrimary: { backgroundColor: '#6C63FF', borderColor: '#6C63FF' },
+
+  // States
+  loadingBox: { alignItems: 'center', padding: 40 },
+  emptyBox: { alignItems: 'center', padding: 50 },
+  emptyEmoji: { fontSize: 44, marginBottom: 12 },
+  emptyTitle: { fontSize: 16, fontWeight: '700', color: '#fff', marginBottom: 6 },
+  emptySub: { fontSize: 13, color: '#444' },
+
+  // FAB
   fab: {
-    position: 'absolute', bottom: 24, right: 20,
-    backgroundColor: '#6C63FF', borderRadius: 20,
-    paddingHorizontal: 16, paddingVertical: 12,
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.5, shadowRadius: 12, elevation: 12,
+    position: 'absolute', bottom: 28, right: 20,
+    width: 56, height: 56, borderRadius: 28,
+    backgroundColor: '#6C63FF', alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.45, shadowRadius: 14, elevation: 14,
   },
-  fabText: { color: '#fff', fontSize: 14, fontWeight: 'bold' },
 });

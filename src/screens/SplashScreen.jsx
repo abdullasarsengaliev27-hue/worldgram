@@ -1,7 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, Animated, Dimensions } from 'react-native';
+import { supabase } from '../lib/supabase';
 
-const { width, height } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 
 export default function SplashScreen({ navigation }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -10,11 +11,11 @@ export default function SplashScreen({ navigation }) {
   const textFade = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
+    // Запускаем анимацию
     Animated.sequence([
       Animated.parallel([
         Animated.spring(scaleAnim, {
-          toValue: 1, tension: 40,
-          friction: 6, useNativeDriver: true,
+          toValue: 1, tension: 40, friction: 6, useNativeDriver: true,
         }),
         Animated.timing(fadeAnim, {
           toValue: 1, duration: 800, useNativeDriver: true,
@@ -28,12 +29,32 @@ export default function SplashScreen({ navigation }) {
       }),
     ]).start();
 
-    setTimeout(() => navigation.replace('Onboarding'), 2800);
+    // Проверяем сессию
+    checkSession();
   }, []);
+
+  const checkSession = async () => {
+    try {
+      // Ждём немного чтобы анимация успела запуститься
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (session?.user) {
+        // Сессия есть — сразу на главный экран
+        navigation.replace('Main');
+      } else {
+        // Нет сессии — на онбординг
+        navigation.replace('Onboarding');
+      }
+    } catch (error) {
+      // Ошибка — на онбординг
+      navigation.replace('Onboarding');
+    }
+  };
 
   return (
     <View style={styles.container}>
-      {/* Фоновые круги */}
       <View style={styles.bgCircle1} />
       <View style={styles.bgCircle2} />
 
@@ -41,10 +62,7 @@ export default function SplashScreen({ navigation }) {
         opacity: fadeAnim,
         transform: [{ scale: scaleAnim }]
       }]}>
-        {/* Внешнее кольцо */}
         <Animated.View style={[styles.logoRing, { opacity: glowAnim }]} />
-
-        {/* Логотип */}
         <View style={styles.logoCircle}>
           <Text style={styles.logoText}>W</Text>
         </View>
@@ -55,7 +73,6 @@ export default function SplashScreen({ navigation }) {
         <Text style={styles.tagline}>Общайся по-новому ✨</Text>
       </Animated.View>
 
-      {/* Загрузка */}
       <Animated.View style={[styles.loadingContainer, { opacity: textFade }]}>
         <View style={styles.loadingBar}>
           <Animated.View style={[styles.loadingFill, {
@@ -64,6 +81,7 @@ export default function SplashScreen({ navigation }) {
             })
           }]} />
         </View>
+        <Text style={styles.loadingText}>Загрузка...</Text>
       </Animated.View>
     </View>
   );
@@ -84,7 +102,10 @@ const styles = StyleSheet.create({
     borderRadius: 100, backgroundColor: 'rgba(108,99,255,0.04)',
     bottom: 100, left: -50,
   },
-  logoContainer: { alignItems: 'center', justifyContent: 'center', marginBottom: 30 },
+  logoContainer: {
+    alignItems: 'center', justifyContent: 'center',
+    marginBottom: 30,
+  },
   logoRing: {
     position: 'absolute', width: 130, height: 130,
     borderRadius: 65, borderWidth: 1,
@@ -106,13 +127,14 @@ const styles = StyleSheet.create({
   tagline: { fontSize: 15, color: '#6C63FF', letterSpacing: 1 },
   loadingContainer: {
     position: 'absolute', bottom: 80,
-    width: width * 0.5,
+    width: width * 0.5, alignItems: 'center', gap: 10,
   },
   loadingBar: {
-    height: 3, backgroundColor: '#1A1A2E',
-    borderRadius: 2, overflow: 'hidden',
+    width: '100%', height: 3,
+    backgroundColor: '#1A1A2E', borderRadius: 2, overflow: 'hidden',
   },
   loadingFill: {
     height: '100%', backgroundColor: '#6C63FF', borderRadius: 2,
   },
+  loadingText: { color: '#333', fontSize: 12 },
 });
