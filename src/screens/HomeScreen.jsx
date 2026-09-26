@@ -54,7 +54,11 @@ return () => supabase.removeChannel(subscription);
   };
 
   const fetchUsers = async (myId) => {
-    const { data } = await supabase.from('profiles').select('*').neq('id', myId);
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .neq('id', myId)
+      .eq('is_test_account', false); // скрываем тестовые
     if (data) setUsers(data);
     setLoading(false);
   };

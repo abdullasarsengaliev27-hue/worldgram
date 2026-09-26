@@ -37,11 +37,11 @@ export default function ChatScreen({ route, navigation }) {
   const typingTimer = useRef(null);
 
   useEffect(() => {
+    loadBackground(); // ← первым!
     getUser();
     fetchMessages();
     loadSuggestions();
-    loadBackground();
-
+  
     const msgSubscription = supabase
       .channel(`chat-${chatId}`)
       .on('postgres_changes', {
@@ -108,8 +108,14 @@ export default function ChatScreen({ route, navigation }) {
   const loadBackground = async () => {
     try {
       const { data } = await supabase
-        .from('chats').select('chat_background').eq('id', chatId).single();
-      if (data?.chat_background) setChatBackground(data.chat_background);
+        .from('chats')
+        .select('chat_background')
+        .eq('id', chatId)
+        .single();
+  
+      if (data?.chat_background && data.chat_background !== 'default') {
+        setChatBackground(data.chat_background);
+      }
     } catch (e) { }
   };
 
