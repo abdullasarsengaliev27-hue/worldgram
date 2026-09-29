@@ -222,6 +222,13 @@ return () => supabase.removeChannel(subscription);
         </View>
       </View>
 
+      <TouchableOpacity
+  style={styles.notifBtn}
+  onPress={() => navigation.navigate('SearchUsers')}
+>
+  <Ionicons name="search" size={20} color="#6C63FF" />
+</TouchableOpacity>
+
       {/* Stories */}
       <View style={styles.storiesWrapper}>
         <ScrollView

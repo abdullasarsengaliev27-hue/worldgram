@@ -18,6 +18,8 @@ export default function SettingsScreen({ navigation }) {
   const [onlineVisible, setOnlineVisible] = useState(true);
   const [storiesVisible, setStoriesVisible] = useState(true);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [customUsername, setCustomUsername] = useState('');
+const [lastSeenVisibility, setLastSeenVisibility] = useState('everyone');
 
   useEffect(() => {
     fetchProfile();
@@ -36,6 +38,8 @@ export default function SettingsScreen({ navigation }) {
           setOnlineVisible(data.online_visible !== false);
           setStoriesVisible(data.stories_visible !== false);
           setBio(data.bio || '');
+          setCustomUsername(data.custom_username || '');
+setLastSeenVisibility(data.last_seen_visibility || 'everyone');
         }
       }
     } catch (e) {
@@ -60,8 +64,12 @@ export default function SettingsScreen({ navigation }) {
         online_visible: onlineVisible,
         stories_visible: storiesVisible,
         bio: bio.trim(),
+        custom_username: customUsername.trim().toLowerCase().replace('@', ''),
+last_seen_visibility: lastSeenVisibility,
       }).eq('id', user.id).select();
   
+
+
       console.log('Save result:', data, error);
   
       if (error) {
@@ -196,6 +204,39 @@ export default function SettingsScreen({ navigation }) {
             />
           </View>
         </View>
+
+        <View style={styles.inputGroup}>
+  <Text style={styles.inputLabel}>Имя пользователя (@username)</Text>
+  <View style={styles.inputWrapper}>
+    <Text style={{ color: '#6C63FF', fontSize: 16 }}>@</Text>
+    <TextInput
+      style={styles.input}
+      placeholder="твой_username"
+      placeholderTextColor="#555"
+      value={customUsername}
+      onChangeText={setCustomUsername}
+      autoCapitalize="none"
+    />
+  </View>
+</View>
+
+<View style={styles.inputGroup}>
+  <Text style={styles.inputLabel}>Кто видит время последнего входа</Text>
+  {['everyone', 'nobody'].map(option => (
+    <TouchableOpacity
+      key={option}
+      style={[styles.optionItem, lastSeenVisibility === option && styles.optionItemActive]}
+      onPress={() => setLastSeenVisibility(option)}
+    >
+      <Text style={[styles.optionText, lastSeenVisibility === option && styles.optionTextActive]}>
+        {option === 'everyone' ? '👥 Все' : '🚫 Никто'}
+      </Text>
+      {lastSeenVisibility === option && (
+        <Ionicons name="checkmark-circle" size={20} color="#6C63FF" />
+      )}
+    </TouchableOpacity>
+  ))}
+</View>
 
         <View style={styles.section}>
   <Text style={styles.sectionTitle}>📝 О себе</Text>
@@ -375,4 +416,15 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
   },
   menuItemText: { flex: 1, fontSize: 15, color: '#fff' },
+
+  optionItem: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#0D0D1A', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 12,
+    borderWidth: 1, borderColor: '#1A1A2E', marginBottom: 6,
+  },
+  optionItemActive: { borderColor: '#6C63FF', backgroundColor: '#1A1A3E' },
+  optionText: { color: '#888', fontSize: 14 },
+  optionTextActive: { color: '#6C63FF', fontWeight: '600' },
 });

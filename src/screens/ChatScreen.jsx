@@ -223,6 +223,34 @@ export default function ChatScreen({ route, navigation }) {
     setIsTyping(false);
     updateTypingStatus(false);
 
+    // Проверяем упоминания @username
+const mentions = content.match(/@(\w+)/g);
+if (mentions && data) {
+  for (const mention of mentions) {
+    const username = mention.replace('@', '');
+    const { data: mentionedUser } = await supabase
+      .from('profiles')
+      .select('id')
+      .or(`custom_username.eq.${username},username.eq.${username}`)
+      .single();
+
+    if (mentionedUser) {
+      await supabase.from('mentions').insert({
+        chat_id: chatId,
+        message_id: data.id,
+        mentioned_user_id: mentionedUser.id,
+      });
+
+      await sendPushToUser(
+        mentionedUser.id,
+        `📣 Тебя упомянули`,
+        `${userName}: ${content}`,
+        { type: 'mention', chatId }
+      );
+    }
+  }
+}
+
     const tempMessage = {
       id: `temp-${Date.now()}`,
       chat_id: chatId, sender_id: userId, content,
@@ -379,6 +407,21 @@ export default function ChatScreen({ route, navigation }) {
     const status = getMessageStatus(item);
     const statusColor = getStatusColor(item);
 
+    const renderMessageContent = (content) => {
+      const parts = content.split(/(@\w+)/g);
+      return (
+        <Text style={styles.messageText}>
+          {parts.map((part, i) =>
+            part.startsWith('@') ? (
+              <Text key={i} style={styles.mention}>{part}</Text>
+            ) : (
+              <Text key={i}>{part}</Text>
+            )
+          )}
+        </Text>
+      );
+    };
+
     return (
       <View>
         {showTime && (
@@ -397,7 +440,7 @@ export default function ChatScreen({ route, navigation }) {
             ]);
           }}
           activeOpacity={0.8}
-        >
+        > 
           {isImage ? (
             <View style={[styles.imageBubble, isMe && styles.imageBubbleMe]}>
               {item.reply_to_content && (
@@ -427,7 +470,7 @@ export default function ChatScreen({ route, navigation }) {
                   <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
                 </View>
               )}
-              <Text style={styles.messageText}>{item.content}</Text>
+{renderMessageContent(item.content)}
               <View style={styles.messageFooter}>
                 <Text style={[styles.messageTime, isMe && styles.messageTimeMe]}>
                   {formatTime(item.created_at)}
@@ -773,4 +816,5 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.4, shadowRadius: 8, elevation: 8,
   },
   sendBtnDisabled: { opacity: 0.3 },
+  mention: { color: '#6C63FF', fontWeight: 'bold' },
 });

@@ -83,6 +83,24 @@ export default function UserProfileScreen({ route, navigation }) {
     );
   }
 
+  const blockUser = async () => {
+    Alert.alert('Заблокировать?', 'Пользователь не сможет писать тебе', [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Заблокировать', style: 'destructive',
+        onPress: async () => {
+          const { data: { user } } = await supabase.auth.getUser();
+          await supabase.from('blocked_users').insert({
+            blocker_id: user.id,
+            blocked_id: userId,
+          });
+          Alert.alert('✅', 'Пользователь заблокирован');
+          navigation.goBack();
+        }
+      }
+    ]);
+  };
+
   const displayName = profile?.full_name || profile?.username || 'Пользователь';
   const avatarLetter = displayName[0].toUpperCase();
   const avatarColor = profile?.avatar_color || '#6C63FF';
@@ -152,6 +170,11 @@ export default function UserProfileScreen({ route, navigation }) {
           <Text style={[styles.actionBtnText, { color: '#6C63FF' }]}>Позвонить</Text>
         </TouchableOpacity>
       </View>
+
+      <TouchableOpacity style={styles.blockBtn} onPress={blockUser}>
+  <Ionicons name="ban" size={18} color="#FF4444" />
+  <Text style={styles.blockBtnText}>Заблокировать</Text>
+</TouchableOpacity>
 
       {/* Истории */}
       {stories.length > 0 && (
@@ -253,4 +276,13 @@ const styles = StyleSheet.create({
   },
   storyEmoji: { fontSize: 32 },
   storyText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+
+  blockBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'center', gap: 8,
+    marginHorizontal: 16, padding: 14,
+    backgroundColor: '#1A0A0A', borderRadius: 14,
+    borderWidth: 1, borderColor: '#3A1A1A', marginTop: 8,
+  },
+  blockBtnText: { color: '#FF4444', fontSize: 14, fontWeight: '600' },
 });

@@ -90,6 +90,8 @@ export default function ProfileScreen({ navigation }) {
     { icon: 'document-text', label: 'Условия использования', sub: 'Правила сервиса', screen: 'Terms', color: '#00D2D3' },
     { icon: 'lock-closed', label: 'Конфиденциальность', sub: 'Политика данных', screen: 'Privacy', color: '#4CAF50' },
     { icon: 'help-circle', label: 'Помощь', sub: 'FAQ и поддержка', screen: 'Help', color: '#A29BFE' },
+    { icon: 'bookmark', label: 'Избранное', sub: 'Заметки и сохранённое', screen: 'SavedMessages', color: '#FFC107' },
+{ icon: 'ban', label: 'Заблокированные', sub: 'Управление блокировками', screen: 'BlockedUsers', color: '#FF4444' },
   ];
 
   return (

@@ -27,6 +27,11 @@ import CallSummariesScreen from '../screens/CallSummariesScreen';
 import GroupInfoScreen from '../screens/GroupInfoScreen';
 import ChatBackgroundScreen from '../screens/ChatBackgroundScreen';
 import ContactsScreen from '../screens/ContactsScreen';
+import SavedMessagesScreen from '../screens/SavedMessagesScreen';
+import BlockedUsersScreen from '../screens/BlockedUsersScreen';
+import SearchUsersScreen from '../screens/SearchUsersScreen';
+import ChannelsScreen from '../screens/ChannelsScreen';
+import ChannelDetailScreen from '../screens/ChannelDetailScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -85,6 +90,19 @@ function MainTabs() {
     ),
   }}
 />
+<Tab.Screen
+  name="Channels"
+  component={ChannelsScreen}
+  options={{
+    tabBarLabel: 'Каналы',
+    tabBarIcon: ({ focused, color, size }) => (
+      <Ionicons
+        name={focused ? 'megaphone' : 'megaphone-outline'}
+        size={size} color={color}
+      />
+    ),
+  }}
+/>
     </Tab.Navigator>
 
     
@@ -120,6 +138,11 @@ export default function AppNavigator() {
 <Stack.Screen name="GroupInfo" component={GroupInfoScreen} />
 <Stack.Screen name="ChatBackground" component={ChatBackgroundScreen} />
 <Stack.Screen name="Contacts" component={ContactsScreen} />
+<Stack.Screen name="SavedMessages" component={SavedMessagesScreen} />
+<Stack.Screen name="BlockedUsers" component={BlockedUsersScreen} />
+<Stack.Screen name="SearchUsers" component={SearchUsersScreen} />
+<Stack.Screen name="Channels" component={ChannelsScreen} />
+<Stack.Screen name="ChannelDetail" component={ChannelDetailScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

@@ -81,16 +81,25 @@ const addMember = async (userId, userName) => {
     Alert.alert('Сохранено! ✅', 'Информация группы обновлена');
   };
 
-  const removeMember = async (userId, userName) => {
-    Alert.alert(`Удалить ${userName}?`, 'Участник будет удалён из группы', [
+  const setMemberRole = async (memberId, newRole) => {
+    await supabase.from('chat_members')
+      .update({ role: newRole })
+      .eq('chat_id', chatId)
+      .eq('user_id', memberId);
+    fetchMembers();
+    Alert.alert('✅', newRole === 'admin' ? 'Назначен администратором' : 'Права изменены');
+  };
+  
+  const banMember = async (memberId, memberName) => {
+    Alert.alert(`Забанить ${memberName}?`, 'Участник не сможет писать в группе', [
       { text: 'Отмена', style: 'cancel' },
       {
-        text: 'Удалить', style: 'destructive',
+        text: 'Забанить', style: 'destructive',
         onPress: async () => {
           await supabase.from('chat_members')
-            .delete()
+            .update({ is_banned: true, can_send_messages: false })
             .eq('chat_id', chatId)
-            .eq('user_id', userId);
+            .eq('user_id', memberId);
           fetchMembers();
         }
       }
@@ -305,12 +314,32 @@ const addMember = async (userId, userName) => {
             <Text style={styles.leaveBtnText}>Выйти из группы</Text>
           </TouchableOpacity>
 
-          {isCreator && (
-            <TouchableOpacity style={styles.deleteBtn} onPress={deleteGroup}>
-              <Ionicons name="trash-outline" size={20} color="#FF4444" />
-              <Text style={styles.deleteBtnText}>Удалить группу</Text>
-            </TouchableOpacity>
-          )}
+          {isCreator && !isMe && (
+  <TouchableOpacity
+    style={styles.memberMenuBtn}
+    onPress={() => {
+      const isMemberAdmin = member.role === 'admin';
+      Alert.alert(name, 'Управление участником', [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: isMemberAdmin ? '👤 Снять права' : '👑 Сделать админом',
+          onPress: () => setMemberRole(member.user_id, isMemberAdmin ? 'member' : 'admin')
+        },
+        {
+          text: '🚫 Забанить',
+          onPress: () => banMember(member.user_id, name)
+        },
+        {
+          text: '❌ Удалить',
+          style: 'destructive',
+          onPress: () => removeMember(member.user_id, name)
+        },
+      ]);
+    }}
+  >
+    <Ionicons name="ellipsis-vertical" size={18} color="#555" />
+  </TouchableOpacity>
+)}
         </View>
 
         <View style={{ height: 40 }} />
@@ -450,4 +479,5 @@ const styles = StyleSheet.create({
     gap: 10, paddingVertical: 8,
     borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
   },
+  memberMenuBtn: { padding: 6 },
 });
