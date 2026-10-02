@@ -314,32 +314,62 @@ const addMember = async (userId, userName) => {
             <Text style={styles.leaveBtnText}>Выйти из группы</Text>
           </TouchableOpacity>
 
-          {isCreator && !isMe && (
-  <TouchableOpacity
-    style={styles.memberMenuBtn}
-    onPress={() => {
-      const isMemberAdmin = member.role === 'admin';
-      Alert.alert(name, 'Управление участником', [
-        { text: 'Отмена', style: 'cancel' },
-        {
-          text: isMemberAdmin ? '👤 Снять права' : '👑 Сделать админом',
-          onPress: () => setMemberRole(member.user_id, isMemberAdmin ? 'member' : 'admin')
-        },
-        {
-          text: '🚫 Забанить',
-          onPress: () => banMember(member.user_id, name)
-        },
-        {
-          text: '❌ Удалить',
-          style: 'destructive',
-          onPress: () => removeMember(member.user_id, name)
-        },
-      ]);
-    }}
-  >
-    <Ionicons name="ellipsis-vertical" size={18} color="#555" />
-  </TouchableOpacity>
-)}
+          {members.map((member, i) => {
+  const profile = member.profiles;
+  const isMember = member.user_id === currentUserId; // ← было isMe
+  const name = profile?.full_name || profile?.username || 'Пользователь';
+  return (
+    <View key={member.user_id} style={styles.memberItem}>
+      <View style={[styles.memberAvatar, { backgroundColor: COLORS[i % COLORS.length] }]}>
+        <Text style={styles.memberAvatarText}>
+          {name[0].toUpperCase()}
+        </Text>
+        {profile?.is_online && <View style={styles.onlineDot} />}
+      </View>
+      <View style={styles.memberInfo}>
+        <Text style={styles.memberName}>
+          {name} {isMember && '(Ты)'}
+        </Text>
+        <Text style={[styles.memberStatus, {
+          color: profile?.is_online ? '#4CAF50' : '#555'
+        }]}>
+          {member.role === 'admin' ? '👑 Админ' : '● Участник'}
+        </Text>
+      </View>
+      {isCreator && !isMember && (
+        <TouchableOpacity
+          style={styles.memberMenuBtn}
+          onPress={() => {
+            const isMemberAdmin = member.role === 'admin';
+            Alert.alert(name, 'Управление участником', [
+              { text: 'Отмена', style: 'cancel' },
+              {
+                text: isMemberAdmin ? '👤 Снять права' : '👑 Сделать админом',
+                onPress: () => setMemberRole(member.user_id, isMemberAdmin ? 'member' : 'admin')
+              },
+              {
+                text: '🚫 Забанить',
+                onPress: () => banMember(member.user_id, name)
+              },
+              {
+                text: '❌ Удалить',
+                style: 'destructive',
+                onPress: () => removeMember(member.user_id, name)
+              },
+            ]);
+          }}
+        >
+          <Ionicons name="ellipsis-vertical" size={18} color="#555" />
+        </TouchableOpacity>
+      )}
+      {isMember && isCreator && (
+        <View style={styles.adminBadge}>
+          <Text style={styles.adminBadgeText}>👑 Ты</Text>
+        </View>
+      )}
+    </View>
+  );
+})}
         </View>
 
         <View style={{ height: 40 }} />

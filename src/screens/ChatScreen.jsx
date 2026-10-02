@@ -2,13 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   FlatList, StyleSheet, KeyboardAvoidingView,
-  Platform, ScrollView, StatusBar, Image, Alert
+  Platform, ScrollView, StatusBar, Image,
+  Alert, Modal, Animated
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../lib/supabase';
-import { sendPushToUser, showLocalNotification } from '../lib/notifications';
+import { sendPushToUser } from '../lib/notifications';
 import { getBackground } from '../lib/backgrounds';
 
 const AI_SUGGESTIONS = [
@@ -16,9 +17,17 @@ const AI_SUGGESTIONS = [
   'Что планируешь на выходные?',
   'Расскажи что нового у тебя!',
   'Как твои дела с работой?',
-  'Куда собираешься в этом месяце?',
   'Что смотришь сейчас?',
   'Как настроение сегодня?',
+];
+
+const QUICK_REACTIONS = ['👍', '❤️', '🔥', '😂', '😮', '👏'];
+const SELF_DESTRUCT_OPTIONS = [
+  { label: '10 секунд', seconds: 10 },
+  { label: '1 минута', seconds: 60 },
+  { label: '1 час', seconds: 3600 },
+  { label: '24 часа', seconds: 86400 },
+  { label: 'Выкл', seconds: null },
 ];
 
 export default function ChatScreen({ route, navigation }) {
@@ -30,19 +39,26 @@ export default function ChatScreen({ route, navigation }) {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [replyTo, setReplyTo] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
   const [chatBackground, setChatBackground] = useState('default');
-  const [isTyping, setIsTyping] = useState(false);
   const [partnerTyping, setPartnerTyping] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [showReactions, setShowReactions] = useState(false);
+  const [selectedMessage, setSelectedMessage] = useState(null);
+  const [messageReactions, setMessageReactions] = useState({});
+  const [selfDestructSeconds, setSelfDestructSeconds] = useState(null);
+  const [showSelfDestruct, setShowSelfDestruct] = useState(false);
   const flatListRef = useRef(null);
   const typingTimer = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => {
-    loadBackground(); // ← первым!
     getUser();
     fetchMessages();
     loadSuggestions();
-  
-    const msgSubscription = supabase
+    loadBackground();
+
+    const msgSub = supabase
       .channel(`chat-${chatId}`)
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public',
@@ -55,25 +71,26 @@ export default function ChatScreen({ route, navigation }) {
           return [...prev, payload.new];
         });
         setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-        // Отмечаем как прочитанное
         markAsRead(payload.new.id, payload.new.sender_id);
       })
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public',
         table: 'messages', filter: `chat_id=eq.${chatId}`,
       }, (payload) => {
-        setMessages(prev => prev.map(m =>
-          m.id === payload.new.id ? { ...m, ...payload.new } : m
-        ));
+        if (payload.new.deleted_for_all) {
+          setMessages(prev => prev.filter(m => m.id !== payload.new.id));
+        } else {
+          setMessages(prev => prev.map(m =>
+            m.id === payload.new.id ? { ...m, ...payload.new } : m
+          ));
+        }
       })
       .subscribe();
 
-    // Подписка на статус печатает
-    const typingSubscription = supabase
+    const typingSub = supabase
       .channel(`typing-${chatId}`)
       .on('postgres_changes', {
-        event: '*', schema: 'public',
-        table: 'typing_status',
+        event: '*', schema: 'public', table: 'typing_status',
         filter: `chat_id=eq.${chatId}`,
       }, async (payload) => {
         const { data: { user } } = await supabase.auth.getUser();
@@ -84,8 +101,8 @@ export default function ChatScreen({ route, navigation }) {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(msgSubscription);
-      supabase.removeChannel(typingSubscription);
+      supabase.removeChannel(msgSub);
+      supabase.removeChannel(typingSub);
       clearTypingStatus();
     };
   }, [chatId]);
@@ -96,26 +113,11 @@ export default function ChatScreen({ route, navigation }) {
     }
   }, [route.params?.chatBackground]);
 
-  const markAsRead = async (messageId, senderId) => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (senderId !== user?.id) {
-      await supabase.from('messages')
-        .update({ is_read: true })
-        .eq('id', messageId);
-    }
-  };
-
   const loadBackground = async () => {
     try {
       const { data } = await supabase
-        .from('chats')
-        .select('chat_background')
-        .eq('id', chatId)
-        .single();
-  
-      if (data?.chat_background && data.chat_background !== 'default') {
-        setChatBackground(data.chat_background);
-      }
+        .from('chats').select('chat_background').eq('id', chatId).single();
+      if (data?.chat_background) setChatBackground(data.chat_background);
     } catch (e) { }
   };
 
@@ -132,31 +134,45 @@ export default function ChatScreen({ route, navigation }) {
   const fetchMessages = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
-  
     const { data } = await supabase
       .from('messages').select('*')
       .eq('chat_id', chatId)
       .eq('deleted_for_all', false)
       .order('created_at', { ascending: true });
-  
     if (data) {
-      const filtered = data.filter(m =>
-        !m.deleted_for_me?.includes(user.id)
-      );
+      const filtered = data.filter(m => !m.deleted_for_me?.includes(user.id));
       setMessages(filtered);
-  
-      // Помечаем все непрочитанные сообщения как прочитанные
-      const unread = filtered.filter(m =>
-        m.sender_id !== user.id && !m.is_read
-      );
-  
-      if (unread.length > 0) {
-        for (const msg of unread) {
-          await supabase.from('messages')
-            .update({ is_read: true })
-            .eq('id', msg.id);
-        }
+      // Загружаем реакции
+      fetchReactions(filtered.map(m => m.id));
+      // Помечаем как прочитанные
+      const unread = filtered.filter(m => m.sender_id !== user.id && !m.is_read);
+      for (const msg of unread) {
+        await supabase.from('messages').update({ is_read: true }).eq('id', msg.id);
       }
+    }
+  };
+
+  const fetchReactions = async (messageIds) => {
+    if (!messageIds.length) return;
+    const { data } = await supabase
+      .from('message_reactions')
+      .select('*')
+      .in('message_id', messageIds);
+    if (data) {
+      const grouped = {};
+      data.forEach(r => {
+        if (!grouped[r.message_id]) grouped[r.message_id] = {};
+        if (!grouped[r.message_id][r.emoji]) grouped[r.message_id][r.emoji] = [];
+        grouped[r.message_id][r.emoji].push(r.user_id);
+      });
+      setMessageReactions(grouped);
+    }
+  };
+
+  const markAsRead = async (messageId, senderId) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (senderId !== user?.id) {
+      await supabase.from('messages').update({ is_read: true }).eq('id', messageId);
     }
   };
 
@@ -164,10 +180,8 @@ export default function ChatScreen({ route, navigation }) {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
     await supabase.from('typing_status').upsert({
-      chat_id: chatId,
-      user_id: user.id,
-      is_typing: typing,
-      updated_at: new Date().toISOString(),
+      chat_id: chatId, user_id: user.id,
+      is_typing: typing, updated_at: new Date().toISOString(),
     }, { onConflict: 'chat_id,user_id' });
   };
 
@@ -176,43 +190,16 @@ export default function ChatScreen({ route, navigation }) {
     if (!user) return;
     await supabase.from('typing_status')
       .update({ is_typing: false })
-      .eq('chat_id', chatId)
-      .eq('user_id', user.id);
+      .eq('chat_id', chatId).eq('user_id', user.id);
   };
 
   const handleTyping = (text) => {
     setNewMessage(text);
-    if (!isTyping) {
-      setIsTyping(true);
-      updateTypingStatus(true);
-    }
+    if (!isTyping) { setIsTyping(true); updateTypingStatus(true); }
     clearTimeout(typingTimer.current);
     typingTimer.current = setTimeout(() => {
-      setIsTyping(false);
-      updateTypingStatus(false);
+      setIsTyping(false); updateTypingStatus(false);
     }, 2000);
-  };
-
-  const sendPushNotification = async (content) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data: members } = await supabase
-        .from('chat_members').select('user_id')
-        .eq('chat_id', chatId).neq('user_id', user.id);
-      if (members?.length > 0) {
-        const { data: senderProfile } = await supabase
-          .from('profiles').select('full_name, username')
-          .eq('id', user.id).single();
-        const senderName = senderProfile?.full_name || senderProfile?.username || 'Пользователь';
-        for (const member of members) {
-          await sendPushToUser(
-            member.user_id, `💬 ${senderName}`,
-            content.startsWith('[IMAGE]') ? '📸 Фото' : content,
-            { type: 'message', chatId }
-          );
-        }
-      }
-    } catch (e) { }
   };
 
   const sendMessage = async (text) => {
@@ -223,42 +210,35 @@ export default function ChatScreen({ route, navigation }) {
     setIsTyping(false);
     updateTypingStatus(false);
 
-    // Проверяем упоминания @username
-const mentions = content.match(/@(\w+)/g);
-if (mentions && data) {
-  for (const mention of mentions) {
-    const username = mention.replace('@', '');
-    const { data: mentionedUser } = await supabase
-      .from('profiles')
-      .select('id')
-      .or(`custom_username.eq.${username},username.eq.${username}`)
-      .single();
-
-    if (mentionedUser) {
-      await supabase.from('mentions').insert({
-        chat_id: chatId,
-        message_id: data.id,
-        mentioned_user_id: mentionedUser.id,
-      });
-
-      await sendPushToUser(
-        mentionedUser.id,
-        `📣 Тебя упомянули`,
-        `${userName}: ${content}`,
-        { type: 'mention', chatId }
-      );
+    // Если редактируем
+    if (editingMessage) {
+      await supabase.from('messages').update({
+        content,
+        is_edited: true,
+        edited_at: new Date().toISOString(),
+      }).eq('id', editingMessage.id);
+      setMessages(prev => prev.map(m =>
+        m.id === editingMessage.id ? { ...m, content, is_edited: true } : m
+      ));
+      setEditingMessage(null);
+      setNewMessage('');
+      return;
     }
-  }
-}
+
+    // Самоуничтожение
+    let selfDestructAt = null;
+    if (selfDestructSeconds) {
+      selfDestructAt = new Date(Date.now() + selfDestructSeconds * 1000).toISOString();
+    }
 
     const tempMessage = {
       id: `temp-${Date.now()}`,
       chat_id: chatId, sender_id: userId, content,
       created_at: new Date().toISOString(),
       reply_to_content: replyTo?.content || null,
-      reply_to_sender: replyTo?.sender_id || null,
       is_read: false, is_delivered: false,
-      deleted_for_all: false, deleted_for_me: [],
+      is_edited: false, deleted_for_all: false, deleted_for_me: [],
+      self_destruct_at: selfDestructAt,
     };
 
     setMessages(prev => [...prev, tempMessage]);
@@ -269,60 +249,120 @@ if (mentions && data) {
     const { data } = await supabase.from('messages').insert({
       chat_id: chatId, sender_id: userId, content,
       reply_to_content: replyTo?.content || null,
-      reply_to_sender: replyTo?.sender_id || null,
       is_delivered: true,
+      self_destruct_after: selfDestructSeconds,
+      self_destruct_at: selfDestructAt,
     }).select().single();
 
     if (data) {
       setMessages(prev => prev.map(m => m.id === tempMessage.id ? data : m));
+      // Планируем самоуничтожение
+      if (selfDestructSeconds && data.id) {
+        setTimeout(async () => {
+          await supabase.from('messages')
+            .update({ deleted_for_all: true })
+            .eq('id', data.id);
+          setMessages(prev => prev.filter(m => m.id !== data.id));
+        }, selfDestructSeconds * 1000);
+      }
     }
 
     sendPushNotification(content);
     loadSuggestions();
   };
 
+  const sendPushNotification = async (content) => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const { data: members } = await supabase
+        .from('chat_members').select('user_id')
+        .eq('chat_id', chatId).neq('user_id', user.id);
+      if (members?.length > 0) {
+        const { data: senderProfile } = await supabase
+          .from('profiles').select('full_name, username').eq('id', user.id).single();
+        const senderName = senderProfile?.full_name || senderProfile?.username || 'Пользователь';
+        for (const member of members) {
+          await sendPushToUser(member.user_id, `💬 ${senderName}`,
+            content.startsWith('[IMAGE]') ? '📸 Фото' : content,
+            { type: 'message', chatId });
+        }
+      }
+    } catch (e) { }
+  };
+
+  const addReaction = async (messageId, emoji) => {
+    const existing = messageReactions[messageId]?.[emoji];
+    const alreadyReacted = existing?.includes(userId);
+
+    if (alreadyReacted) {
+      await supabase.from('message_reactions')
+        .delete().eq('message_id', messageId).eq('user_id', userId).eq('emoji', emoji);
+    } else {
+      await supabase.from('message_reactions').insert({
+        message_id: messageId, user_id: userId, emoji
+      });
+    }
+
+    setShowReactions(false);
+    setSelectedMessage(null);
+    fetchReactions(messages.map(m => m.id));
+  };
+
+  const editMessage = (message) => {
+    setEditingMessage(message);
+    setNewMessage(message.content);
+    inputRef.current?.focus();
+  };
+
+  const clearChatHistory = () => {
+    Alert.alert('Очистить историю?', 'Все сообщения будут удалены у тебя', [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Очистить', style: 'destructive',
+        onPress: async () => {
+          await supabase.from('messages')
+            .update({ deleted_for_me: supabase.rpc('array_append_unique', {
+              arr: [], val: userId
+            })})
+            .eq('chat_id', chatId);
+          setMessages([]);
+        }
+      }
+    ]);
+  };
+
   const deleteMessage = (message) => {
     const isMe = message.sender_id === userId;
-    const options = [
+    Alert.alert('Сообщение', '', [
       { text: 'Отмена', style: 'cancel' },
+      isMe ? { text: '✏️ Редактировать', onPress: () => editMessage(message) } : null,
       {
         text: '🗑 Удалить у себя',
         onPress: async () => {
           const currentDeleted = message.deleted_for_me || [];
           if (!currentDeleted.includes(userId)) {
             await supabase.from('messages')
-              .update({
-                deleted_for_me: [...currentDeleted, userId]
-              })
+              .update({ deleted_for_me: [...currentDeleted, userId] })
               .eq('id', message.id);
           }
           setMessages(prev => prev.filter(m => m.id !== message.id));
         }
       },
-    ];
-  
-    if (isMe) {
-      options.push({
-        text: '🗑 Удалить у всех',
-        style: 'destructive',
+      isMe ? {
+        text: '🗑 Удалить у всех', style: 'destructive',
         onPress: async () => {
           await supabase.from('messages')
-            .update({
-              deleted_for_all: true,
-              content: '🗑 Сообщение удалено',
-            })
+            .update({ deleted_for_all: true, content: '🗑 Сообщение удалено' })
             .eq('id', message.id);
           setMessages(prev => prev.filter(m => m.id !== message.id));
         }
-      });
-    }
-  
-    Alert.alert('Сообщение', 'Что сделать?', options);
+      } : null,
+    ].filter(Boolean));
   };
 
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Нет доступа', 'Разреши доступ к галерее'); return; }
+    if (status !== 'granted') { Alert.alert('Нет доступа'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7, allowsEditing: true,
     });
@@ -331,7 +371,7 @@ if (mentions && data) {
 
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Нет доступа', 'Разреши доступ к камере'); return; }
+    if (status !== 'granted') { Alert.alert('Нет доступа'); return; }
     const result = await ImagePicker.launchCameraAsync({ quality: 0.7, allowsEditing: true });
     if (!result.canceled && result.assets[0]) await uploadImage(result.assets[0].uri);
   };
@@ -351,8 +391,7 @@ if (mentions && data) {
       const { data: urlData } = supabase.storage.from('chat-media').getPublicUrl(fileName);
       await supabase.from('messages').insert({
         chat_id: chatId, sender_id: userId,
-        content: `[IMAGE]${urlData.publicUrl}`,
-        is_delivered: true,
+        content: `[IMAGE]${urlData.publicUrl}`, is_delivered: true,
       });
     } catch (error) {
       Alert.alert('Ошибка', 'Не удалось загрузить фото');
@@ -362,9 +401,14 @@ if (mentions && data) {
   };
 
   const showMediaOptions = () => {
-    Alert.alert('Отправить фото', '', [
+    Alert.alert('Отправить', '', [
       { text: '📷 Камера', onPress: takePhoto },
       { text: '🖼 Галерея', onPress: pickImage },
+      {
+        text: `💣 Самоуничт. (${selfDestructSeconds ? SELF_DESTRUCT_OPTIONS.find(o => o.seconds === selfDestructSeconds)?.label : 'Выкл'})`,
+        onPress: () => setShowSelfDestruct(true)
+      },
+      { text: '🗑 Очистить историю', onPress: clearChatHistory },
       { text: 'Отмена', style: 'cancel' },
     ]);
   };
@@ -375,6 +419,7 @@ if (mentions && data) {
 
   const isImageMessage = (content) => content?.startsWith('[IMAGE]');
   const getImageUrl = (content) => content?.replace('[IMAGE]', '');
+
   const getReplyPreview = (content) => {
     if (!content) return '';
     if (isImageMessage(content)) return '📸 Фото';
@@ -382,7 +427,6 @@ if (mentions && data) {
   };
 
   const getMessageStatus = (message) => {
-    if (message.sender_id !== userId) return null;
     if (message.id?.startsWith('temp-')) return '🕐';
     if (message.is_read) return '✓✓';
     if (message.is_delivered) return '✓✓';
@@ -390,10 +434,23 @@ if (mentions && data) {
   };
 
   const getStatusColor = (message) => {
-    if (message.id?.startsWith('temp-')) return 'rgba(255,255,255,0.3)';
     if (message.is_read) return '#6C63FF';
-    if (message.is_delivered) return 'rgba(255,255,255,0.5)';
-    return 'rgba(255,255,255,0.3)';
+    return 'rgba(255,255,255,0.5)';
+  };
+
+  const renderMessageContent = (content) => {
+    const parts = content.split(/(@\w+)/g);
+    return (
+      <Text style={styles.messageText}>
+        {parts.map((part, i) =>
+          part.startsWith('@') ? (
+            <Text key={i} style={styles.mention}>{part}</Text>
+          ) : (
+            <Text key={i}>{part}</Text>
+          )
+        )}
+      </Text>
+    );
   };
 
   const bg = getBackground(chatBackground);
@@ -406,21 +463,9 @@ if (mentions && data) {
       new Date(item.created_at) - new Date(prevItem.created_at) > 300000;
     const status = getMessageStatus(item);
     const statusColor = getStatusColor(item);
-
-    const renderMessageContent = (content) => {
-      const parts = content.split(/(@\w+)/g);
-      return (
-        <Text style={styles.messageText}>
-          {parts.map((part, i) =>
-            part.startsWith('@') ? (
-              <Text key={i} style={styles.mention}>{part}</Text>
-            ) : (
-              <Text key={i}>{part}</Text>
-            )
-          )}
-        </Text>
-      );
-    };
+    const reactions = messageReactions[item.id] || {};
+    const hasReactions = Object.keys(reactions).length > 0;
+    const isSelfDestruct = item.self_destruct_at;
 
     return (
       <View>
@@ -430,57 +475,70 @@ if (mentions && data) {
         <TouchableOpacity
           style={[styles.messageRow, isMe && styles.messageRowMe]}
           onLongPress={() => {
-            Alert.alert('Сообщение', '', [
-              { text: 'Отмена', style: 'cancel' },
-              { text: '↩ Ответить', onPress: () => setReplyTo(item) },
-              {
-                text: '🗑 Удалить', style: 'destructive',
-                onPress: () => deleteMessage(item)
-              },
-            ]);
+            setSelectedMessage(item);
+            setShowReactions(true);
           }}
           activeOpacity={0.8}
-        > 
-          {isImage ? (
-            <View style={[styles.imageBubble, isMe && styles.imageBubbleMe]}>
-              {item.reply_to_content && (
-                <View style={styles.replyPreviewInBubble}>
-                  <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
-                </View>
-              )}
-              <Image
-                source={{ uri: getImageUrl(item.content) }}
-                style={styles.messageImage} resizeMode="cover"
-              />
-              <View style={styles.messageFooter}>
-                <Text style={[styles.messageTime, { color: 'rgba(255,255,255,0.7)' }]}>
-                  {formatTime(item.created_at)}
-                </Text>
-                {status && <Text style={[styles.statusIcon, { color: statusColor }]}>{status}</Text>}
-              </View>
-            </View>
-          ) : (
-            <View style={[styles.bubble, {
-              backgroundColor: isMe ? bg.bubbleMe : bg.bubbleThem,
-              borderBottomRightRadius: isMe ? 4 : 18,
-              borderBottomLeftRadius: isMe ? 18 : 4,
-            }]}>
-              {item.reply_to_content && (
-                <View style={styles.replyPreviewInBubble}>
-                  <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
-                </View>
-              )}
-{renderMessageContent(item.content)}
-              <View style={styles.messageFooter}>
-                <Text style={[styles.messageTime, isMe && styles.messageTimeMe]}>
-                  {formatTime(item.created_at)}
-                </Text>
-                {status && (
-                  <Text style={[styles.statusIcon, { color: statusColor }]}>{status}</Text>
+        >
+          <View>
+            {isImage ? (
+              <View style={[styles.imageBubble, isMe && styles.imageBubbleMe]}>
+                {item.reply_to_content && (
+                  <View style={styles.replyPreviewInBubble}>
+                    <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
+                  </View>
                 )}
+                <Image
+                  source={{ uri: getImageUrl(item.content) }}
+                  style={styles.messageImage} resizeMode="cover"
+                />
+                <View style={styles.messageFooter}>
+                  <Text style={[styles.messageTime, { color: 'rgba(255,255,255,0.7)' }]}>
+                    {formatTime(item.created_at)}
+                    {isSelfDestruct && ' 💣'}
+                  </Text>
+                  {isMe && <Text style={[styles.statusIcon, { color: statusColor }]}>{status}</Text>}
+                </View>
               </View>
-            </View>
-          )}
+            ) : (
+              <View style={[styles.bubble, {
+                backgroundColor: isMe ? bg.bubbleMe : bg.bubbleThem,
+                borderBottomRightRadius: isMe ? 4 : 18,
+                borderBottomLeftRadius: isMe ? 18 : 4,
+              }]}>
+                {item.reply_to_content && (
+                  <View style={styles.replyPreviewInBubble}>
+                    <Text style={styles.replyPreviewText}>↩ {getReplyPreview(item.reply_to_content)}</Text>
+                  </View>
+                )}
+                {renderMessageContent(item.content)}
+                <View style={styles.messageFooter}>
+                  <Text style={[styles.messageTime, isMe && styles.messageTimeMe]}>
+                    {formatTime(item.created_at)}
+                    {item.is_edited && ' ✏️'}
+                    {isSelfDestruct && ' 💣'}
+                  </Text>
+                  {isMe && <Text style={[styles.statusIcon, { color: statusColor }]}>{status}</Text>}
+                </View>
+              </View>
+            )}
+
+            {/* Реакции */}
+            {hasReactions && (
+              <View style={[styles.reactionsRow, isMe && styles.reactionsRowMe]}>
+                {Object.entries(reactions).map(([emoji, users]) => (
+                  <TouchableOpacity
+                    key={emoji}
+                    style={[styles.reactionChip, users.includes(userId) && styles.reactionChipActive]}
+                    onPress={() => addReaction(item.id, emoji)}
+                  >
+                    <Text style={styles.reactionEmoji}>{emoji}</Text>
+                    <Text style={styles.reactionCount}>{users.length}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
         </TouchableOpacity>
       </View>
     );
@@ -494,7 +552,6 @@ if (mentions && data) {
     >
       <StatusBar barStyle="light-content" />
 
-      {/* Фирменный фон */}
       {bg.branded && (
         <View style={styles.brandedBg}>
           <Text style={styles.brandedLogo}>W</Text>
@@ -533,28 +590,21 @@ if (mentions && data) {
         </TouchableOpacity>
 
         <View style={styles.headerActions}>
-          <TouchableOpacity
-            style={styles.headerBtn}
-            onPress={() => navigation.navigate('Call', { userName })}
-          >
+          <TouchableOpacity style={styles.headerBtn}
+            onPress={() => navigation.navigate('Call', { userName })}>
             <Ionicons name="videocam" size={18} color="#6C63FF" />
           </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerBtn}
+          <TouchableOpacity style={styles.headerBtn}
             onPress={() => navigation.navigate('ChatBackground', {
               chatId, currentBackground: chatBackground,
-            })}
-          >
+            })}>
             <Ionicons name="color-palette-outline" size={18} color="#6C63FF" />
           </TouchableOpacity>
           {route.params?.isGroup && (
-            <TouchableOpacity
-              style={styles.headerBtn}
+            <TouchableOpacity style={styles.headerBtn}
               onPress={() => navigation.navigate('GroupInfo', {
-                chatId, groupName: userName,
-                groupAvatar: route.params?.groupAvatar,
-              })}
-            >
+                chatId, groupName: userName, groupAvatar: route.params?.groupAvatar,
+              })}>
               <Ionicons name="information-circle-outline" size={20} color="#6C63FF" />
             </TouchableOpacity>
           )}
@@ -582,7 +632,6 @@ if (mentions && data) {
             ))}
             <TouchableOpacity style={styles.refreshCard} onPress={loadSuggestions}>
               <Ionicons name="refresh" size={18} color="#6C63FF" />
-              <Text style={styles.refreshText}>Ещё</Text>
             </TouchableOpacity>
           </ScrollView>
         </View>
@@ -605,7 +654,7 @@ if (mentions && data) {
         }
       />
 
-      {/* Индикатор печатает */}
+      {/* Печатает */}
       {partnerTyping && (
         <View style={[styles.typingContainer, { backgroundColor: bg.colors[0] + 'EE' }]}>
           <View style={styles.typingBubble}>
@@ -615,13 +664,37 @@ if (mentions && data) {
         </View>
       )}
 
-      {/* Панель ответа */}
+      {/* Самоуничтожение включено */}
+      {selfDestructSeconds && (
+        <View style={[styles.selfDestructBanner, { backgroundColor: bg.colors[0] + 'EE' }]}>
+          <Ionicons name="timer-outline" size={14} color="#FF9F43" />
+          <Text style={styles.selfDestructText}>
+            💣 Самоуничт.: {SELF_DESTRUCT_OPTIONS.find(o => o.seconds === selfDestructSeconds)?.label}
+          </Text>
+          <TouchableOpacity onPress={() => setSelfDestructSeconds(null)}>
+            <Ionicons name="close" size={14} color="#FF9F43" />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Редактирование */}
+      {editingMessage && (
+        <View style={[styles.editingBanner, { backgroundColor: bg.colors[0] + 'EE' }]}>
+          <Ionicons name="create-outline" size={16} color="#6C63FF" />
+          <Text style={styles.editingText}>Редактирование</Text>
+          <TouchableOpacity onPress={() => { setEditingMessage(null); setNewMessage(''); }}>
+            <Ionicons name="close" size={18} color="#555" />
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Ответ */}
       {replyTo && (
         <View style={[styles.replyPanel, { backgroundColor: bg.colors[0] + 'EE' }]}>
           <View style={styles.replyPanelLeft}>
             <Ionicons name="return-up-back" size={16} color="#6C63FF" />
             <View style={styles.replyPanelInfo}>
-              <Text style={styles.replyPanelLabel}>Ответ на сообщение</Text>
+              <Text style={styles.replyPanelLabel}>Ответ</Text>
               <Text style={styles.replyPanelText} numberOfLines={1}>
                 {getReplyPreview(replyTo.content)}
               </Text>
@@ -635,26 +708,19 @@ if (mentions && data) {
 
       {/* Input */}
       <View style={[styles.inputRow, { backgroundColor: bg.colors[0] + 'EE' }]}>
-        <TouchableOpacity
-          style={styles.inputIconBtn}
-          onPress={() => setShowSuggestions(!showSuggestions)}
-        >
+        <TouchableOpacity style={styles.inputIconBtn}
+          onPress={() => setShowSuggestions(!showSuggestions)}>
           <Ionicons name="bulb-outline" size={20} color={showSuggestions ? '#6C63FF' : '#555'} />
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.inputIconBtn}
-          onPress={showMediaOptions}
-          disabled={uploading}
-        >
-          <Ionicons
-            name={uploading ? 'hourglass' : 'camera-outline'}
-            size={20} color={uploading ? '#555' : '#888'}
-          />
+        <TouchableOpacity style={styles.inputIconBtn} onPress={showMediaOptions} disabled={uploading}>
+          <Ionicons name={uploading ? 'hourglass' : 'add-circle-outline'} size={22}
+            color={uploading ? '#555' : '#888'} />
         </TouchableOpacity>
 
         <View style={styles.inputContainer}>
           <TextInput
+            ref={inputRef}
             style={styles.input}
             placeholder="Сообщение..."
             placeholderTextColor="#555"
@@ -669,9 +735,87 @@ if (mentions && data) {
           onPress={() => sendMessage()}
           disabled={!newMessage.trim()}
         >
-          <Ionicons name="send" size={17} color="#fff" />
+          <Ionicons name={editingMessage ? 'checkmark' : 'send'} size={17} color="#fff" />
         </TouchableOpacity>
       </View>
+
+      {/* Реакции Modal */}
+      <Modal visible={showReactions} transparent animationType="fade">
+        <TouchableOpacity
+          style={styles.reactionsOverlay}
+          onPress={() => { setShowReactions(false); setSelectedMessage(null); }}
+        >
+          <View style={styles.reactionsModal}>
+            <Text style={styles.reactionsTitle}>Быстрые реакции</Text>
+            <View style={styles.reactionsGrid}>
+              {QUICK_REACTIONS.map(emoji => (
+                <TouchableOpacity
+                  key={emoji}
+                  style={styles.reactionOption}
+                  onPress={() => addReaction(selectedMessage?.id, emoji)}
+                >
+                  <Text style={styles.reactionOptionEmoji}>{emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <View style={styles.reactionActions}>
+              <TouchableOpacity style={styles.reactionActionBtn}
+                onPress={() => { setReplyTo(selectedMessage); setShowReactions(false); }}>
+                <Ionicons name="return-up-back" size={18} color="#6C63FF" />
+                <Text style={styles.reactionActionText}>Ответить</Text>
+              </TouchableOpacity>
+              {selectedMessage?.sender_id === userId && (
+                <TouchableOpacity style={styles.reactionActionBtn}
+                  onPress={() => { editMessage(selectedMessage); setShowReactions(false); }}>
+                  <Ionicons name="create-outline" size={18} color="#FFC107" />
+                  <Text style={styles.reactionActionText}>Изменить</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity style={styles.reactionActionBtn}
+                onPress={() => { deleteMessage(selectedMessage); setShowReactions(false); }}>
+                <Ionicons name="trash-outline" size={18} color="#FF4444" />
+                <Text style={[styles.reactionActionText, { color: '#FF4444' }]}>Удалить</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* Самоуничтожение Modal */}
+      <Modal visible={showSelfDestruct} transparent animationType="slide">
+        <TouchableOpacity
+          style={styles.selfDestructOverlay}
+          onPress={() => setShowSelfDestruct(false)}
+        >
+          <View style={styles.selfDestructModal}>
+            <Text style={styles.selfDestructTitle}>💣 Самоуничтожение</Text>
+            <Text style={styles.selfDestructDesc}>
+              Сообщение удалится автоматически после отправки
+            </Text>
+            {SELF_DESTRUCT_OPTIONS.map(option => (
+              <TouchableOpacity
+                key={String(option.seconds)}
+                style={[styles.selfDestructOption,
+                  selfDestructSeconds === option.seconds && styles.selfDestructOptionActive
+                ]}
+                onPress={() => {
+                  setSelfDestructSeconds(option.seconds);
+                  setShowSelfDestruct(false);
+                }}
+              >
+                <Text style={[styles.selfDestructOptionText,
+                  selfDestructSeconds === option.seconds && styles.selfDestructOptionTextActive
+                ]}>
+                  {option.label}
+                </Text>
+                {selfDestructSeconds === option.seconds && (
+                  <Ionicons name="checkmark-circle" size={20} color="#6C63FF" />
+                )}
+              </TouchableOpacity>
+            ))}
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -698,8 +842,7 @@ const styles = StyleSheet.create({
   headerProfile: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },
   avatar: {
     width: 40, height: 40, borderRadius: 20,
-    backgroundColor: '#6C63FF', alignItems: 'center',
-    justifyContent: 'center', position: 'relative',
+    backgroundColor: '#6C63FF', alignItems: 'center', justifyContent: 'center',
   },
   avatarImage: { width: 40, height: 40, borderRadius: 20 },
   avatarText: { fontSize: 17, fontWeight: 'bold', color: '#fff' },
@@ -732,15 +875,13 @@ const styles = StyleSheet.create({
     padding: 10, marginLeft: 12, maxWidth: 170,
     borderWidth: 1, borderColor: 'rgba(108,99,255,0.2)',
   },
-  suggestionText: { color: '#fff', fontSize: 12, marginBottom: 5, lineHeight: 17 },
+  suggestionText: { color: '#fff', fontSize: 12, marginBottom: 4 },
   suggestionSend: { color: '#6C63FF', fontSize: 10, fontWeight: '700' },
   refreshCard: {
     backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 12,
     padding: 10, marginLeft: 10, marginRight: 12,
-    alignItems: 'center', justifyContent: 'center',
-    width: 60, gap: 3,
+    alignItems: 'center', justifyContent: 'center', width: 44,
   },
-  refreshText: { color: '#6C63FF', fontSize: 10 },
   messagesList: { padding: 14, paddingBottom: 6 },
   timeLabel: {
     textAlign: 'center', color: 'rgba(255,255,255,0.25)',
@@ -756,6 +897,7 @@ const styles = StyleSheet.create({
   },
   replyPreviewText: { color: 'rgba(255,255,255,0.65)', fontSize: 11 },
   messageText: { color: '#fff', fontSize: 15, lineHeight: 20 },
+  mention: { color: '#6C63FF', fontWeight: 'bold' },
   messageFooter: {
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'flex-end', gap: 4, marginTop: 3,
@@ -769,6 +911,17 @@ const styles = StyleSheet.create({
   },
   imageBubbleMe: { borderBottomLeftRadius: 16, borderBottomRightRadius: 4 },
   messageImage: { width: 220, height: 180 },
+  reactionsRow: { flexDirection: 'row', gap: 4, marginTop: 3, flexWrap: 'wrap' },
+  reactionsRowMe: { justifyContent: 'flex-end' },
+  reactionChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12,
+    paddingHorizontal: 7, paddingVertical: 3,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
+  },
+  reactionChipActive: { backgroundColor: 'rgba(108,99,255,0.3)', borderColor: '#6C63FF' },
+  reactionEmoji: { fontSize: 14 },
+  reactionCount: { fontSize: 11, color: '#fff' },
   typingContainer: {
     paddingHorizontal: 16, paddingVertical: 6,
     borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.06)',
@@ -781,6 +934,18 @@ const styles = StyleSheet.create({
   },
   typingDots: { color: '#6C63FF', fontSize: 10, letterSpacing: 2 },
   typingText: { color: '#888', fontSize: 12 },
+  selfDestructBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 6,
+    borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.06)',
+  },
+  selfDestructText: { flex: 1, color: '#FF9F43', fontSize: 12 },
+  editingBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    paddingHorizontal: 16, paddingVertical: 8,
+    borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.06)',
+  },
+  editingText: { flex: 1, color: '#6C63FF', fontSize: 13, fontWeight: '600' },
   replyPanel: {
     flexDirection: 'row', alignItems: 'center',
     padding: 10, borderTopWidth: 1,
@@ -804,17 +969,62 @@ const styles = StyleSheet.create({
   },
   inputContainer: {
     flex: 1, backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 22, paddingHorizontal: 14,
-    paddingVertical: 9, borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 22, paddingHorizontal: 14, paddingVertical: 9,
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
   },
   input: { color: '#fff', fontSize: 15, maxHeight: 100 },
   sendBtn: {
     width: 40, height: 40, borderRadius: 20,
     backgroundColor: '#6C63FF', alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.4, shadowRadius: 8, elevation: 8,
   },
   sendBtnDisabled: { opacity: 0.3 },
-  mention: { color: '#6C63FF', fontWeight: 'bold' },
+  reactionsOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  reactionsModal: {
+    backgroundColor: '#111120', borderRadius: 20,
+    padding: 20, width: '85%',
+    borderWidth: 1, borderColor: '#1A1A2E',
+  },
+  reactionsTitle: {
+    fontSize: 16, fontWeight: 'bold', color: '#fff',
+    textAlign: 'center', marginBottom: 16,
+  },
+  reactionsGrid: {
+    flexDirection: 'row', justifyContent: 'space-around', marginBottom: 16,
+  },
+  reactionOption: {
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: '#1A1A2E', alignItems: 'center', justifyContent: 'center',
+  },
+  reactionOptionEmoji: { fontSize: 26 },
+  reactionActions: {
+    flexDirection: 'row', justifyContent: 'space-around',
+    paddingTop: 12, borderTopWidth: 1, borderTopColor: '#1A1A2E',
+  },
+  reactionActionBtn: { alignItems: 'center', gap: 4 },
+  reactionActionText: { color: '#fff', fontSize: 11 },
+  selfDestructOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end',
+  },
+  selfDestructModal: {
+    backgroundColor: '#111120', borderTopLeftRadius: 24,
+    borderTopRightRadius: 24, padding: 24,
+  },
+  selfDestructTitle: {
+    fontSize: 18, fontWeight: 'bold', color: '#fff',
+    textAlign: 'center', marginBottom: 8,
+  },
+  selfDestructDesc: {
+    fontSize: 13, color: '#555', textAlign: 'center', marginBottom: 20,
+  },
+  selfDestructOption: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#0D0D1A', borderRadius: 12, padding: 14,
+    marginBottom: 8, borderWidth: 1, borderColor: '#1A1A2E',
+  },
+  selfDestructOptionActive: { borderColor: '#6C63FF', backgroundColor: '#1A1A3E' },
+  selfDestructOptionText: { fontSize: 15, color: '#888' },
+  selfDestructOptionTextActive: { color: '#6C63FF', fontWeight: '600' },
 });
