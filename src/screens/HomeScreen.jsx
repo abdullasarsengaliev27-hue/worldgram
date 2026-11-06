@@ -8,6 +8,21 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Notifications from 'expo-notifications';
 import { supabase } from '../lib/supabase';
 import { formatLastSeen } from '../lib/presence';
+import { getOrCreatePrivateChat, findPrivateChatId } from '../lib/chats';
+
+// Онлайн, только если приложение недавно "отстукивалось"
+const isUserOnline = (u) => {
+  if (!u || u.online_visible === false || !u.is_online || !u.last_seen) return false;
+  return Date.now() - new Date(u.last_seen).getTime() < 70000;
+};
+
+const getStatus = (u) => {
+  if (isUserOnline(u)) return { text: '● Онлайн', online: true };
+  if (u.online_visible === false || u.last_seen_visibility === 'nobody') {
+    return { text: '● Был(а) недавно', online: false };
+  }
+  return { text: `● ${formatLastSeen(u.last_seen)}`, online: false };
+};
 
 export default function HomeScreen({ navigation }) {
   const [users, setUsers] = useState([]);
@@ -15,30 +30,42 @@ export default function HomeScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState('');
-  const [currentUser, setCurrentUser] = useState(null);
   const [stories, setStories] = useState([]);
   const [activeTab, setActiveTab] = useState('all');
+  const [, setTick] = useState(0);
+
+  // Раз в 30 секунд обновляем статусы "в сети"
+  useEffect(() => {
+    const i = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(i);
+  }, []);
 
   useEffect(() => {
     getCurrentUser();
-    Notifications.setBadgeCountAsync(0);
-    const channelName = `profiles-online-${Date.now()}`;
-const subscription = supabase
-  .channel(channelName)
-  .on('postgres_changes', {
-    event: 'UPDATE', schema: 'public', table: 'profiles',
-  }, (payload) => {
-    setUsers(prev => prev.map(u =>
-      u.id === payload.new.id ? { ...u, ...payload.new } : u
-    ));
-  }).subscribe();
-return () => supabase.removeChannel(subscription);
+    try { Notifications.setBadgeCountAsync(0); } catch (e) { }
+
+    const subscription = supabase
+      .channel(`profiles-online-${Date.now()}`)
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'profiles',
+      }, (payload) => {
+        setUsers(prev => prev.map(u =>
+          u.id === payload.new.id ? { ...u, ...payload.new } : u
+        ));
+      }).subscribe();
+
+    // Обновляем список, когда возвращаемся на этот экран
+    const unsub = navigation.addListener('focus', () => getCurrentUser());
+
+    return () => {
+      supabase.removeChannel(subscription);
+      unsub();
+    };
   }, []);
 
   const getCurrentUser = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
-      setCurrentUser(user);
       await Promise.all([
         fetchUsers(user.id),
         fetchGroupChats(user.id),
@@ -58,8 +85,15 @@ return () => supabase.removeChannel(subscription);
       .from('profiles')
       .select('*')
       .neq('id', myId)
-      .eq('is_test_account', false); // скрываем тестовые
-    if (data) setUsers(data);
+      .eq('is_test_account', false);
+
+    const { data: blocks } = await supabase
+      .from('blocked_users')
+      .select('blocked_id')
+      .eq('blocker_id', myId);
+    const blockedIds = new Set((blocks || []).map(b => b.blocked_id));
+
+    setUsers((data || []).filter(u => !blockedIds.has(u.id)));
     setLoading(false);
   };
 
@@ -67,86 +101,83 @@ return () => supabase.removeChannel(subscription);
     try {
       const { data: memberChats } = await supabase
         .from('chat_members').select('chat_id').eq('user_id', myId);
-      if (!memberChats?.length) return;
+      if (!memberChats?.length) {
+        setGroupChats([]);
+        return;
+      }
       const chatIds = memberChats.map(c => c.chat_id);
       const { data } = await supabase
         .from('chats').select('*').eq('is_group', true).in('id', chatIds);
-      if (data) setGroupChats(data);
+      setGroupChats(data || []);
     } catch (e) { }
   };
 
   const fetchStories = async (myId) => {
     const { data } = await supabase
       .from('stories')
-      .select('*, profiles(full_name, username)')
+      .select('*, profiles(full_name, username, stories_visible)')
       .gt('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false });
-    if (data) setStories(data);
+    if (data) {
+      // Свои истории видны всегда, чужие — только если человек их не скрыл
+      setStories(data.filter(s =>
+        s.user_id === myId || s.profiles?.stories_visible !== false
+      ));
+    }
   };
 
   const openChat = async (otherUser) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data: existingChats } = await supabase
-        .from('chat_members').select('chat_id').eq('user_id', user.id);
-      const myChatsIds = existingChats?.map(c => c.chat_id) || [];
-      let chatId = null;
-      if (myChatsIds.length > 0) {
-        const { data: sharedChat } = await supabase
-          .from('chat_members').select('chat_id')
-          .eq('user_id', otherUser.id)
-          .in('chat_id', myChatsIds).limit(1);
-        if (sharedChat?.length > 0) chatId = sharedChat[0].chat_id;
-      }
-      if (!chatId) {
-        const { data: newChat } = await supabase
-          .from('chats').insert({}).select().single();
-        chatId = newChat.id;
-        await supabase.from('chat_members').insert([
-          { chat_id: chatId, user_id: user.id },
-          { chat_id: chatId, user_id: otherUser.id }
-        ]);
-      }
+      const chatId = await getOrCreatePrivateChat(otherUser.id);
       navigation.navigate('Chat', {
         chatId,
         userName: otherUser.full_name || otherUser.username,
         userId: otherUser.id,
         avatarUrl: otherUser.avatar_url || null,
       });
-    } catch (e) { }
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось открыть чат');
+    }
   };
 
-  const deleteChat = async (otherUserId) => {
-    Alert.alert('Удалить чат?', '', [
+  const startCall = async (otherUser) => {
+    try {
+      const chatId = await getOrCreatePrivateChat(otherUser.id);
+      navigation.navigate('Call', {
+        userName: otherUser.full_name || otherUser.username,
+        chatId,
+        isVideo: true,
+      });
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось начать звонок');
+    }
+  };
+
+  const deleteChat = (otherUser) => {
+    Alert.alert('Удалить чат?', 'Переписка будет удалена у обоих', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Удалить', style: 'destructive',
         onPress: async () => {
           try {
-            const { data: { user } } = await supabase.auth.getUser();
-            const { data: existingChats } = await supabase
-              .from('chat_members').select('chat_id').eq('user_id', user.id);
-            const myChatsIds = existingChats?.map(c => c.chat_id) || [];
-            if (myChatsIds.length > 0) {
-              const { data: sharedChat } = await supabase
-                .from('chat_members').select('chat_id')
-                .eq('user_id', otherUserId)
-                .in('chat_id', myChatsIds).limit(1);
-              if (sharedChat?.length > 0) {
-                const chatId = sharedChat[0].chat_id;
-                await supabase.from('messages').delete().eq('chat_id', chatId);
-                await supabase.from('chat_members').delete().eq('chat_id', chatId);
-                await supabase.from('chats').delete().eq('id', chatId);
-              }
+            const chatId = await findPrivateChatId(otherUser.id);
+            if (!chatId) {
+              Alert.alert('Чата нет', 'Переписки с этим человеком ещё нет');
+              return;
             }
+            // Сообщения и участники удаляются каскадом
+            const { error } = await supabase.from('chats').delete().eq('id', chatId);
+            if (error) throw error;
             getCurrentUser();
-          } catch (e) { }
+          } catch (e) {
+            Alert.alert('Ошибка', 'Не удалось удалить чат');
+          }
         }
       }
     ]);
   };
 
-  const leaveGroup = async (groupId) => {
+  const leaveGroup = (groupId) => {
     Alert.alert('Выйти из группы?', '', [
       { text: 'Отмена', style: 'cancel' },
       {
@@ -161,15 +192,21 @@ return () => supabase.removeChannel(subscription);
     ]);
   };
 
-  const deleteGroup = async (groupId) => {
-    Alert.alert('Удалить группу?', '', [
+  const deleteGroup = (groupId) => {
+    Alert.alert('Удалить группу?', 'Группа будет удалена для всех участников', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Удалить', style: 'destructive',
         onPress: async () => {
-          await supabase.from('messages').delete().eq('chat_id', groupId);
-          await supabase.from('chat_members').delete().eq('chat_id', groupId);
-          await supabase.from('chats').delete().eq('id', groupId);
+          const { data, error } = await supabase
+            .from('chats').delete().eq('id', groupId).select('id');
+          if (error || !data?.length) {
+            Alert.alert(
+              'Нельзя удалить',
+              'Удалить группу может только её создатель. Ты можешь выйти из неё.'
+            );
+            return;
+          }
           const { data: { user } } = await supabase.auth.getUser();
           fetchGroupChats(user.id);
         }
@@ -185,7 +222,7 @@ return () => supabase.removeChannel(subscription);
     return acc;
   }, []);
 
-  const onlineCount = users.filter(u => u.is_online).length;
+  const onlineCount = users.filter(isUserOnline).length;
 
   const filteredUsers = users.filter(u => {
     const name = (u.full_name || u.username || '').toLowerCase();
@@ -216,18 +253,17 @@ return () => supabase.removeChannel(subscription);
               <Text style={styles.onlinePillText}>{onlineCount} онлайн</Text>
             </View>
           )}
+          <TouchableOpacity
+            style={styles.notifBtn}
+            onPress={() => navigation.navigate('SearchUsers')}
+          >
+            <Ionicons name="search" size={20} color="#6C63FF" />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.notifBtn}>
             <Ionicons name="notifications-outline" size={22} color="#6C63FF" />
           </TouchableOpacity>
         </View>
       </View>
-
-      <TouchableOpacity
-  style={styles.notifBtn}
-  onPress={() => navigation.navigate('SearchUsers')}
->
-  <Ionicons name="search" size={20} color="#6C63FF" />
-</TouchableOpacity>
 
       {/* Stories */}
       <View style={styles.storiesWrapper}>
@@ -236,7 +272,6 @@ return () => supabase.removeChannel(subscription);
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.storiesContent}
         >
-          {/* Добавить историю */}
           <TouchableOpacity
             style={styles.storyItem}
             onPress={() => navigation.navigate('Stories')}
@@ -329,9 +364,14 @@ return () => supabase.removeChannel(subscription);
                 })}
                 onLongPress={() => Alert.alert(group.group_name, '', [
                   { text: 'Отмена', style: 'cancel' },
-                  { text: 'ℹ️ Информация', onPress: () => navigation.navigate('GroupInfo', {
-                    chatId: group.id, groupName: group.group_name, groupAvatar: group.group_avatar,
-                  })},
+                  {
+                    text: 'ℹ️ Информация',
+                    onPress: () => navigation.navigate('GroupInfo', {
+                      chatId: group.id,
+                      groupName: group.group_name,
+                      groupAvatar: group.group_avatar,
+                    })
+                  },
                   { text: '🚪 Выйти', onPress: () => leaveGroup(group.id) },
                   { text: '🗑 Удалить', style: 'destructive', onPress: () => deleteGroup(group.id) },
                 ])}
@@ -364,68 +404,84 @@ return () => supabase.removeChannel(subscription);
               <View style={styles.emptyBox}>
                 <Text style={styles.emptyEmoji}>👥</Text>
                 <Text style={styles.emptyTitle}>Нет пользователей</Text>
-                <Text style={styles.emptySub}>Зарегистрируй друга!</Text>
+                <Text style={styles.emptySub}>Найди друга по @username через поиск 🔍</Text>
               </View>
             ) : (
-              filteredUsers.map((item, index) => (
-                <TouchableOpacity
-                  key={item.id}
-                  style={styles.chatCard}
-                  onPress={() => openChat(item)}
-                  onLongPress={() => Alert.alert(
-                    item.full_name || item.username, '',
-                    [
-                      { text: 'Отмена', style: 'cancel' },
-                      { text: '👤 Профиль', onPress: () => navigation.navigate('UserProfile', { userId: item.id }) },
-                      { text: '🗑 Удалить чат', style: 'destructive', onPress: () => deleteChat(item.id) },
-                    ]
-                  )}
-                  activeOpacity={0.7}
-                >
+              filteredUsers.map((item, index) => {
+                const status = getStatus(item);
+                return (
                   <TouchableOpacity
-                    onPress={() => navigation.navigate('UserProfile', { userId: item.id })}
-                  >
-                    {item.avatar_url ? (
-                      <Image source={{ uri: item.avatar_url }} style={styles.userAvatar} />
-                    ) : (
-                      <View style={[styles.userAvatar, { backgroundColor: getColor(index) }]}>
-                        <Text style={styles.userAvatarText}>
-                          {(item.full_name || item.username || '?')[0].toUpperCase()}
-                        </Text>
-                      </View>
+                    key={item.id}
+                    style={styles.chatCard}
+                    onPress={() => openChat(item)}
+                    onLongPress={() => Alert.alert(
+                      item.full_name || item.username || 'Пользователь', '',
+                      [
+                        { text: 'Отмена', style: 'cancel' },
+                        {
+                          text: '👤 Профиль',
+                          onPress: () => navigation.navigate('UserProfile', { userId: item.id })
+                        },
+                        {
+                          text: '🚩 Пожаловаться',
+                          onPress: () => navigation.navigate('Report', {
+                            reportedUserId: item.id,
+                            userName: item.full_name || item.username || 'Пользователь',
+                          })
+                        },
+                        {
+                          text: '🗑 Удалить чат', style: 'destructive',
+                          onPress: () => deleteChat(item)
+                        },
+                      ]
                     )}
-                    <View style={[styles.statusDot, {
-                      backgroundColor: item.is_online ? '#4CAF50' : '#2A2A3E'
-                    }]} />
+                    activeOpacity={0.7}
+                  >
+                    <TouchableOpacity
+                      onPress={() => navigation.navigate('UserProfile', { userId: item.id })}
+                    >
+                      {item.avatar_url ? (
+                        <Image source={{ uri: item.avatar_url }} style={styles.userAvatar} />
+                      ) : (
+                        <View style={[styles.userAvatar, { backgroundColor: getColor(index) }]}>
+                          <Text style={styles.userAvatarText}>
+                            {(item.full_name || item.username || '?')[0].toUpperCase()}
+                          </Text>
+                        </View>
+                      )}
+                      <View style={[styles.statusDot, {
+                        backgroundColor: status.online ? '#4CAF50' : '#2A2A3E'
+                      }]} />
+                    </TouchableOpacity>
+
+                    <View style={styles.chatInfo}>
+                      <Text style={styles.chatName}>
+                        {item.full_name || item.username || 'Пользователь'}
+                      </Text>
+                      <Text style={[styles.chatSub, {
+                        color: status.online ? '#4CAF50' : '#444'
+                      }]}>
+                        {status.text}
+                      </Text>
+                    </View>
+
+                    <View style={styles.chatActions}>
+                      <TouchableOpacity
+                        style={styles.actionCircle}
+                        onPress={() => startCall(item)}
+                      >
+                        <Ionicons name="videocam" size={15} color="#6C63FF" />
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.actionCircle, styles.actionCirclePrimary]}
+                        onPress={() => openChat(item)}
+                      >
+                        <Ionicons name="chatbubble" size={15} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
                   </TouchableOpacity>
-
-                  <View style={styles.chatInfo}>
-                    <Text style={styles.chatName}>
-                      {item.full_name || item.username || 'Пользователь'}
-                    </Text>
-                    <Text style={[styles.chatSub, {
-                      color: item.is_online ? '#4CAF50' : '#444'
-                    }]}>
-                      {item.is_online ? '● Онлайн' : `● ${formatLastSeen(item.last_seen)}`}
-                    </Text>
-                  </View>
-
-                  <View style={styles.chatActions}>
-                    <TouchableOpacity
-                      style={styles.actionCircle}
-                      onPress={() => navigation.navigate('Call', { userName: item.full_name || item.username })}
-                    >
-                      <Ionicons name="videocam" size={15} color="#6C63FF" />
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[styles.actionCircle, styles.actionCirclePrimary]}
-                      onPress={() => openChat(item)}
-                    >
-                      <Ionicons name="chatbubble" size={15} color="#fff" />
-                    </TouchableOpacity>
-                  </View>
-                </TouchableOpacity>
-              ))
+                );
+              })
             )}
           </View>
         )}
@@ -448,7 +504,6 @@ return () => supabase.removeChannel(subscription);
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#080810' },
 
-  // Header
   header: {
     flexDirection: 'row', justifyContent: 'space-between',
     alignItems: 'center', paddingHorizontal: 20,
@@ -456,7 +511,7 @@ const styles = StyleSheet.create({
   },
   headerGreeting: { fontSize: 12, color: '#6C63FF', fontWeight: '700', letterSpacing: 0.5 },
   headerTitle: { fontSize: 28, fontWeight: '800', color: '#fff', marginTop: 2 },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   onlinePill: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     backgroundColor: 'rgba(76,175,80,0.12)',
@@ -471,7 +526,6 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#1E1E32',
   },
 
-  // Stories
   storiesWrapper: {
     borderBottomWidth: 1, borderBottomColor: '#111122',
     paddingBottom: 12,
@@ -500,7 +554,6 @@ const styles = StyleSheet.create({
   storyEmoji: { fontSize: 24 },
   storyLabel: { fontSize: 10, color: '#666', textAlign: 'center', width: 62 },
 
-  // Search
   searchRow: { paddingHorizontal: 16, paddingVertical: 10 },
   searchBox: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
@@ -510,7 +563,6 @@ const styles = StyleSheet.create({
   },
   searchInput: { flex: 1, color: '#fff', fontSize: 14 },
 
-  // Tabs
   tabsRow: {
     flexDirection: 'row', marginHorizontal: 16,
     marginBottom: 6, backgroundColor: '#111122',
@@ -522,7 +574,6 @@ const styles = StyleSheet.create({
   tabText: { color: '#444', fontSize: 13, fontWeight: '600' },
   tabTextActive: { color: '#fff' },
 
-  // List
   listContent: { paddingHorizontal: 16 },
   section: { marginBottom: 8 },
   sectionLabel: {
@@ -531,7 +582,6 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
 
-  // Chat Card
   chatCard: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#111122', borderRadius: 18,
@@ -540,7 +590,6 @@ const styles = StyleSheet.create({
     gap: 12,
   },
 
-  // Group avatar
   groupAvatarCircle: {
     width: 50, height: 50, borderRadius: 25,
     backgroundColor: '#1A1A2E', alignItems: 'center',
@@ -548,7 +597,6 @@ const styles = StyleSheet.create({
   },
   groupAvatarEmoji: { fontSize: 24 },
 
-  // User avatar
   userAvatar: {
     width: 50, height: 50, borderRadius: 25,
     alignItems: 'center', justifyContent: 'center',
@@ -561,12 +609,10 @@ const styles = StyleSheet.create({
     borderWidth: 2, borderColor: '#111122',
   },
 
-  // Chat info
   chatInfo: { flex: 1 },
   chatName: { fontSize: 15, fontWeight: '700', color: '#fff', marginBottom: 3 },
   chatSub: { fontSize: 12, color: '#444' },
 
-  // Actions
   chatActions: { flexDirection: 'row', gap: 6 },
   actionCircle: {
     width: 34, height: 34, borderRadius: 17,
@@ -575,14 +621,12 @@ const styles = StyleSheet.create({
   },
   actionCirclePrimary: { backgroundColor: '#6C63FF', borderColor: '#6C63FF' },
 
-  // States
   loadingBox: { alignItems: 'center', padding: 40 },
   emptyBox: { alignItems: 'center', padding: 50 },
   emptyEmoji: { fontSize: 44, marginBottom: 12 },
   emptyTitle: { fontSize: 16, fontWeight: '700', color: '#fff', marginBottom: 6 },
-  emptySub: { fontSize: 13, color: '#444' },
+  emptySub: { fontSize: 13, color: '#444', textAlign: 'center' },
 
-  // FAB
   fab: {
     position: 'absolute', bottom: 28, right: 20,
     width: 56, height: 56, borderRadius: 28,

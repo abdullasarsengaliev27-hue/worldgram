@@ -32,6 +32,8 @@ import BlockedUsersScreen from '../screens/BlockedUsersScreen';
 import SearchUsersScreen from '../screens/SearchUsersScreen';
 import ChannelsScreen from '../screens/ChannelsScreen';
 import ChannelDetailScreen from '../screens/ChannelDetailScreen';
+import ReportScreen from '../screens/ReportScreen';
+import DeleteAccountScreen from '../screens/DeleteAccountScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -57,6 +59,10 @@ function MainTabs() {
             iconName = focused ? 'map' : 'map-outline';
           } else if (route.name === 'Profile') {
             iconName = focused ? 'person' : 'person-outline';
+          } else if (route.name === 'Contacts') {
+            iconName = focused ? 'people' : 'people-outline';
+          } else if (route.name === 'Channels') {
+            iconName = focused ? 'megaphone' : 'megaphone-outline';
           }
           return <Ionicons name={iconName} size={size} color={color} />;
         },
@@ -78,34 +84,16 @@ function MainTabs() {
         options={{ tabBarLabel: 'Профиль' }}
       />
       <Tab.Screen
-  name="Contacts"
-  component={ContactsScreen}
-  options={{
-    tabBarLabel: 'Контакты',
-    tabBarIcon: ({ focused, color, size }) => (
-      <Ionicons
-        name={focused ? 'people' : 'people-outline'}
-        size={size} color={color}
+        name="Contacts"
+        component={ContactsScreen}
+        options={{ tabBarLabel: 'Контакты' }}
       />
-    ),
-  }}
-/>
-<Tab.Screen
-  name="Channels"
-  component={ChannelsScreen}
-  options={{
-    tabBarLabel: 'Каналы',
-    tabBarIcon: ({ focused, color, size }) => (
-      <Ionicons
-        name={focused ? 'megaphone' : 'megaphone-outline'}
-        size={size} color={color}
+      <Tab.Screen
+        name="Channels"
+        component={ChannelsScreen}
+        options={{ tabBarLabel: 'Каналы' }}
       />
-    ),
-  }}
-/>
     </Tab.Navigator>
-
-    
   );
 }
 
@@ -113,10 +101,11 @@ export default function AppNavigator() {
   return (
     <NavigationContainer>
       <Stack.Navigator
-        initialRouteName="Onboarding"
+        initialRouteName="Splash"
         screenOptions={{ headerShown: false }}
       >
         <Stack.Screen name="Splash" component={SplashScreen} />
+        <Stack.Screen name="Onboarding" component={OnboardingScreen} />
         <Stack.Screen name="Login" component={LoginScreen} />
         <Stack.Screen name="Register" component={RegisterScreen} />
         <Stack.Screen name="Main" component={MainTabs} />
@@ -124,25 +113,24 @@ export default function AppNavigator() {
         <Stack.Screen name="Call" component={CallScreen} />
         <Stack.Screen name="Summary" component={SummaryScreen} />
         <Stack.Screen name="Achievements" component={AchievementsScreen} />
-        <Stack.Screen name="Onboarding" component={OnboardingScreen} />
         <Stack.Screen name="Translate" component={TranslateScreen} />
         <Stack.Screen name="EditProfile" component={EditProfileScreen} />
         <Stack.Screen name="CreateGroup" component={CreateGroupScreen} />
         <Stack.Screen name="Stories" component={StoriesScreen} />
         <Stack.Screen name="Privacy" component={PrivacyScreen} />
-<Stack.Screen name="Terms" component={TermsScreen} />
-<Stack.Screen name="UserProfile" component={UserProfileScreen} />
-<Stack.Screen name="Settings" component={SettingsScreen} />
-<Stack.Screen name="Help" component={HelpScreen} />
-<Stack.Screen name="CallSummaries" component={CallSummariesScreen} />
-<Stack.Screen name="GroupInfo" component={GroupInfoScreen} />
-<Stack.Screen name="ChatBackground" component={ChatBackgroundScreen} />
-<Stack.Screen name="Contacts" component={ContactsScreen} />
-<Stack.Screen name="SavedMessages" component={SavedMessagesScreen} />
-<Stack.Screen name="BlockedUsers" component={BlockedUsersScreen} />
-<Stack.Screen name="SearchUsers" component={SearchUsersScreen} />
-<Stack.Screen name="Channels" component={ChannelsScreen} />
-<Stack.Screen name="ChannelDetail" component={ChannelDetailScreen} />
+        <Stack.Screen name="Terms" component={TermsScreen} />
+        <Stack.Screen name="UserProfile" component={UserProfileScreen} />
+        <Stack.Screen name="Settings" component={SettingsScreen} />
+        <Stack.Screen name="Help" component={HelpScreen} />
+        <Stack.Screen name="CallSummaries" component={CallSummariesScreen} />
+        <Stack.Screen name="GroupInfo" component={GroupInfoScreen} />
+        <Stack.Screen name="ChatBackground" component={ChatBackgroundScreen} />
+        <Stack.Screen name="SavedMessages" component={SavedMessagesScreen} />
+        <Stack.Screen name="BlockedUsers" component={BlockedUsersScreen} />
+        <Stack.Screen name="SearchUsers" component={SearchUsersScreen} />
+        <Stack.Screen name="ChannelDetail" component={ChannelDetailScreen} />
+        <Stack.Screen name="Report" component={ReportScreen} />
+        <Stack.Screen name="DeleteAccount" component={DeleteAccountScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

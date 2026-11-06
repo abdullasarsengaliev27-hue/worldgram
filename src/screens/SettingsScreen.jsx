@@ -19,7 +19,8 @@ export default function SettingsScreen({ navigation }) {
   const [storiesVisible, setStoriesVisible] = useState(true);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [customUsername, setCustomUsername] = useState('');
-const [lastSeenVisibility, setLastSeenVisibility] = useState('everyone');
+  const [lastSeenVisibility, setLastSeenVisibility] = useState('everyone');
+  const [bio, setBio] = useState('');
 
   useEffect(() => {
     fetchProfile();
@@ -39,7 +40,7 @@ const [lastSeenVisibility, setLastSeenVisibility] = useState('everyone');
           setStoriesVisible(data.stories_visible !== false);
           setBio(data.bio || '');
           setCustomUsername(data.custom_username || '');
-setLastSeenVisibility(data.last_seen_visibility || 'everyone');
+          setLastSeenVisibility(data.last_seen_visibility || 'everyone');
         }
       }
     } catch (e) {
@@ -47,38 +48,32 @@ setLastSeenVisibility(data.last_seen_visibility || 'everyone');
     }
     setLoading(false);
   };
-  
-
-  const [bio, setBio] = useState('');
-  
 
   const saveSettings = async () => {
     setSaving(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      console.log('Saving for user:', user.id);
-      
-      const { data, error } = await supabase.from('profiles').update({
+
+      const { error } = await supabase.from('profiles').update({
         phone_number: phoneNumber.trim(),
         phone_visible: phoneVisible,
         online_visible: onlineVisible,
         stories_visible: storiesVisible,
         bio: bio.trim(),
         custom_username: customUsername.trim().toLowerCase().replace('@', ''),
-last_seen_visibility: lastSeenVisibility,
-      }).eq('id', user.id).select();
-  
+        last_seen_visibility: lastSeenVisibility,
+      }).eq('id', user.id);
 
-
-      console.log('Save result:', data, error);
-  
       if (error) {
-        Alert.alert('Ошибка', error.message);
+        if (error.code === '23505') {
+          Alert.alert('Имя занято', 'Такой @username уже используется. Выбери другой.');
+        } else {
+          Alert.alert('Ошибка', error.message);
+        }
       } else {
         Alert.alert('Сохранено! ✅', 'Настройки обновлены');
       }
     } catch (e) {
-      console.log('Save error:', e);
       Alert.alert('Ошибка', e.message);
     }
     setSaving(false);
@@ -127,11 +122,14 @@ last_seen_visibility: lastSeenVisibility,
       const { data: urlData } = supabase.storage
         .from('chat-media').getPublicUrl(fileName);
 
+      // ?t= чтобы телефон не показывал старое фото из кэша
+      const freshUrl = `${urlData.publicUrl}?t=${Date.now()}`;
+
       await supabase.from('profiles').update({
-        avatar_url: urlData.publicUrl,
+        avatar_url: freshUrl,
       }).eq('id', user.id);
 
-      setProfile(prev => ({ ...prev, avatar_url: urlData.publicUrl }));
+      setProfile(prev => ({ ...prev, avatar_url: freshUrl }));
       Alert.alert('Готово! 🎉', 'Фото профиля обновлено');
     } catch (error) {
       Alert.alert('Ошибка', 'Не удалось загрузить фото');
@@ -167,7 +165,7 @@ last_seen_visibility: lastSeenVisibility,
         </TouchableOpacity>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false}>
+      <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
 
         {/* Фото профиля */}
         <View style={styles.avatarSection}>
@@ -205,58 +203,62 @@ last_seen_visibility: lastSeenVisibility,
           </View>
         </View>
 
+        {/* Username */}
         <View style={styles.inputGroup}>
-  <Text style={styles.inputLabel}>Имя пользователя (@username)</Text>
-  <View style={styles.inputWrapper}>
-    <Text style={{ color: '#6C63FF', fontSize: 16 }}>@</Text>
-    <TextInput
-      style={styles.input}
-      placeholder="твой_username"
-      placeholderTextColor="#555"
-      value={customUsername}
-      onChangeText={setCustomUsername}
-      autoCapitalize="none"
-    />
-  </View>
-</View>
+          <Text style={styles.inputLabel}>🔎 Имя пользователя (@username)</Text>
+          <View style={styles.inputWrapper}>
+            <Text style={{ color: '#6C63FF', fontSize: 16 }}>@</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="твой_username"
+              placeholderTextColor="#555"
+              value={customUsername}
+              onChangeText={setCustomUsername}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+          </View>
+        </View>
 
-<View style={styles.inputGroup}>
-  <Text style={styles.inputLabel}>Кто видит время последнего входа</Text>
-  {['everyone', 'nobody'].map(option => (
-    <TouchableOpacity
-      key={option}
-      style={[styles.optionItem, lastSeenVisibility === option && styles.optionItemActive]}
-      onPress={() => setLastSeenVisibility(option)}
-    >
-      <Text style={[styles.optionText, lastSeenVisibility === option && styles.optionTextActive]}>
-        {option === 'everyone' ? '👥 Все' : '🚫 Никто'}
-      </Text>
-      {lastSeenVisibility === option && (
-        <Ionicons name="checkmark-circle" size={20} color="#6C63FF" />
-      )}
-    </TouchableOpacity>
-  ))}
-</View>
+        {/* Last seen */}
+        <View style={styles.inputGroup}>
+          <Text style={styles.inputLabel}>👁 Кто видит время последнего входа</Text>
+          {['everyone', 'nobody'].map(option => (
+            <TouchableOpacity
+              key={option}
+              style={[styles.optionItem, lastSeenVisibility === option && styles.optionItemActive]}
+              onPress={() => setLastSeenVisibility(option)}
+            >
+              <Text style={[styles.optionText, lastSeenVisibility === option && styles.optionTextActive]}>
+                {option === 'everyone' ? '👥 Все' : '🚫 Никто'}
+              </Text>
+              {lastSeenVisibility === option && (
+                <Ionicons name="checkmark-circle" size={20} color="#6C63FF" />
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
 
+        {/* О себе */}
         <View style={styles.section}>
-  <Text style={styles.sectionTitle}>📝 О себе</Text>
-  <View style={[styles.inputWrapper, { alignItems: 'flex-start' }]}>
-    <TextInput
-      style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
-      placeholder="Расскажи о себе..."
-      placeholderTextColor="#555"
-      value={bio}
-      onChangeText={setBio}
-      multiline
-      maxLength={150}
-    />
-  </View>
-  <Text style={{ color: '#555', fontSize: 11, textAlign: 'right', marginTop: 4 }}>
-    {bio.length}/150
-  </Text>
-</View>
+          <Text style={styles.sectionTitle}>📝 О себе</Text>
+          <View style={[styles.inputWrapper, { alignItems: 'flex-start' }]}>
+            <TextInput
+              style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
+              placeholder="Расскажи о себе..."
+              placeholderTextColor="#555"
+              value={bio}
+              onChangeText={setBio}
+              multiline
+              maxLength={150}
+            />
+          </View>
+          <Text style={{ color: '#555', fontSize: 11, textAlign: 'right', marginTop: 4 }}>
+            {bio.length}/150
+          </Text>
+        </View>
 
-        {/* Настройки приватности */}
+        {/* Приватность */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>🔒 Приватность</Text>
 
@@ -304,9 +306,10 @@ last_seen_visibility: lastSeenVisibility,
           ))}
         </View>
 
-        {/* Другие настройки */}
+        {/* Аккаунт */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>⚙️ Аккаунт</Text>
+
           <TouchableOpacity
             style={styles.menuItem}
             onPress={() => navigation.navigate('EditProfile')}
@@ -337,6 +340,17 @@ last_seen_visibility: lastSeenVisibility,
               <Ionicons name="document-text" size={20} color="#FF9F43" />
             </View>
             <Text style={styles.menuItemText}>Условия использования</Text>
+            <Ionicons name="chevron-forward" size={18} color="#333" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.menuItem, { borderBottomWidth: 0 }]}
+            onPress={() => navigation.navigate('DeleteAccount')}
+          >
+            <View style={[styles.settingIcon, { backgroundColor: '#FF444422' }]}>
+              <Ionicons name="trash" size={20} color="#FF4444" />
+            </View>
+            <Text style={[styles.menuItemText, { color: '#FF4444' }]}>Удалить аккаунт</Text>
             <Ionicons name="chevron-forward" size={18} color="#333" />
           </TouchableOpacity>
         </View>
@@ -391,6 +405,14 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 15, fontWeight: 'bold', color: '#fff', marginBottom: 14,
   },
+  inputGroup: {
+    marginHorizontal: 16, marginBottom: 16,
+    backgroundColor: '#111120', borderRadius: 18,
+    padding: 16, borderWidth: 1, borderColor: '#1A1A2E',
+  },
+  inputLabel: {
+    fontSize: 15, fontWeight: 'bold', color: '#fff', marginBottom: 14,
+  },
   inputWrapper: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: '#0D0D1A', borderRadius: 12,
@@ -416,7 +438,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
   },
   menuItemText: { flex: 1, fontSize: 15, color: '#fff' },
-
   optionItem: {
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'space-between',

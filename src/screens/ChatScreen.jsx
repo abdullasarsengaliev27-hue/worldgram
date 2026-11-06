@@ -3,7 +3,7 @@ import {
   View, Text, TextInput, TouchableOpacity,
   FlatList, StyleSheet, KeyboardAvoidingView,
   Platform, ScrollView, StatusBar, Image,
-  Alert, Modal, Animated
+  Alert, Modal
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -11,6 +11,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { supabase } from '../lib/supabase';
 import { sendPushToUser } from '../lib/notifications';
 import { getBackground } from '../lib/backgrounds';
+import { formatLastSeen } from '../lib/presence';
 
 const AI_SUGGESTIONS = [
   'Как прошёл твой день?',
@@ -30,8 +31,16 @@ const SELF_DESTRUCT_OPTIONS = [
   { label: 'Выкл', seconds: null },
 ];
 
+// Человек онлайн, только если приложение недавно "отстукивалось"
+const isUserOnline = (p) => {
+  if (!p || p.online_visible === false || !p.is_online || !p.last_seen) return false;
+  return Date.now() - new Date(p.last_seen).getTime() < 70000;
+};
+
 export default function ChatScreen({ route, navigation }) {
   const { chatId, userName } = route.params;
+  const isGroup = !!route.params?.isGroup;
+
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [userId, setUserId] = useState(null);
@@ -42,36 +51,53 @@ export default function ChatScreen({ route, navigation }) {
   const [editingMessage, setEditingMessage] = useState(null);
   const [chatBackground, setChatBackground] = useState('default');
   const [partnerTyping, setPartnerTyping] = useState(false);
+  const [partner, setPartner] = useState(null);
   const [isTyping, setIsTyping] = useState(false);
   const [showReactions, setShowReactions] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [messageReactions, setMessageReactions] = useState({});
   const [selfDestructSeconds, setSelfDestructSeconds] = useState(null);
   const [showSelfDestruct, setShowSelfDestruct] = useState(false);
+  const [, setTick] = useState(0);
+
   const flatListRef = useRef(null);
   const typingTimer = useRef(null);
   const inputRef = useRef(null);
+  const userIdRef = useRef(null);
+  const myNameRef = useRef('Пользователь');
+  const timersRef = useRef([]);
 
+  // Раз в 30 секунд обновляем статус "в сети"
+  useEffect(() => {
+    const i = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(i);
+  }, []);
+
+  // Основная подписка на сообщения и "печатает"
   useEffect(() => {
     getUser();
     fetchMessages();
     loadSuggestions();
     loadBackground();
 
+    const stamp = Date.now();
+
     const msgSub = supabase
-      .channel(`chat-${chatId}`)
+      .channel(`chat-${chatId}-${stamp}`)
       .on('postgres_changes', {
         event: 'INSERT', schema: 'public',
         table: 'messages', filter: `chat_id=eq.${chatId}`,
       }, (payload) => {
-        if (payload.new.deleted_for_all) return;
+        const msg = payload.new;
+        if (msg.deleted_for_all) return;
+        if (msg.deleted_for_me?.includes(userIdRef.current)) return;
         setMessages(prev => {
-          const exists = prev.find(m => m.id === payload.new.id);
-          if (exists) return prev;
-          return [...prev, payload.new];
+          if (prev.some(m => m.id === msg.id)) return prev;
+          return [...prev, msg];
         });
+        scheduleExpiry(msg);
         setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
-        markAsRead(payload.new.id, payload.new.sender_id);
+        markAsRead(msg.id, msg.sender_id);
       })
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public',
@@ -88,14 +114,13 @@ export default function ChatScreen({ route, navigation }) {
       .subscribe();
 
     const typingSub = supabase
-      .channel(`typing-${chatId}`)
+      .channel(`typing-${chatId}-${stamp}`)
       .on('postgres_changes', {
         event: '*', schema: 'public', table: 'typing_status',
         filter: `chat_id=eq.${chatId}`,
-      }, async (payload) => {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (payload.new?.user_id !== user?.id) {
-          setPartnerTyping(payload.new?.is_typing || false);
+      }, (payload) => {
+        if (payload.new?.user_id && payload.new.user_id !== userIdRef.current) {
+          setPartnerTyping(!!payload.new.is_typing);
         }
       })
       .subscribe();
@@ -103,15 +128,54 @@ export default function ChatScreen({ route, navigation }) {
     return () => {
       supabase.removeChannel(msgSub);
       supabase.removeChannel(typingSub);
+      timersRef.current.forEach(clearTimeout);
+      timersRef.current = [];
+      clearTimeout(typingTimer.current);
       clearTypingStatus();
     };
   }, [chatId]);
 
+  // Фон перечитываем каждый раз, когда возвращаемся на этот экран
   useEffect(() => {
-    if (route.params?.chatBackground) {
-      setChatBackground(route.params.chatBackground);
+    const unsub = navigation.addListener('focus', loadBackground);
+    return unsub;
+  }, [navigation, chatId]);
+
+  // Профиль собеседника (статус онлайн) — только для личных чатов
+  useEffect(() => {
+    const partnerId = route.params?.userId;
+    if (!partnerId || isGroup) return;
+
+    supabase
+      .from('profiles')
+      .select('is_online, last_seen, online_visible, last_seen_visibility')
+      .eq('id', partnerId)
+      .single()
+      .then(({ data }) => { if (data) setPartner(data); });
+
+    const ch = supabase
+      .channel(`partner-${partnerId}-${Date.now()}`)
+      .on('postgres_changes', {
+        event: 'UPDATE', schema: 'public', table: 'profiles',
+        filter: `id=eq.${partnerId}`,
+      }, (payload) => {
+        setPartner(prev => ({ ...(prev || {}), ...payload.new }));
+      })
+      .subscribe();
+
+    return () => supabase.removeChannel(ch);
+  }, [route.params?.userId]);
+
+  const scheduleExpiry = (msg) => {
+    if (!msg.self_destruct_at || String(msg.id).startsWith('temp-')) return;
+    const ms = new Date(msg.self_destruct_at).getTime() - Date.now();
+    const remove = () => setMessages(prev => prev.filter(m => m.id !== msg.id));
+    if (ms <= 0) {
+      remove();
+    } else {
+      timersRef.current.push(setTimeout(remove, ms));
     }
-  }, [route.params?.chatBackground]);
+  };
 
   const loadBackground = async () => {
     try {
@@ -128,36 +192,48 @@ export default function ChatScreen({ route, navigation }) {
 
   const getUser = async () => {
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) setUserId(user.id);
+    if (user) {
+      setUserId(user.id);
+      userIdRef.current = user.id;
+      const { data } = await supabase
+        .from('profiles').select('full_name, username').eq('id', user.id).single();
+      myNameRef.current = data?.full_name || data?.username || 'Пользователь';
+    }
   };
 
   const fetchMessages = async () => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
+
     const { data } = await supabase
       .from('messages').select('*')
       .eq('chat_id', chatId)
       .eq('deleted_for_all', false)
       .order('created_at', { ascending: true });
-    if (data) {
-      const filtered = data.filter(m => !m.deleted_for_me?.includes(user.id));
-      setMessages(filtered);
-      // Загружаем реакции
-      fetchReactions(filtered.map(m => m.id));
-      // Помечаем как прочитанные
-      const unread = filtered.filter(m => m.sender_id !== user.id && !m.is_read);
-      for (const msg of unread) {
-        await supabase.from('messages').update({ is_read: true }).eq('id', msg.id);
-      }
+    if (!data) return;
+
+    const now = Date.now();
+    const visible = data.filter(m =>
+      !m.deleted_for_me?.includes(user.id) &&
+      (!m.self_destruct_at || new Date(m.self_destruct_at).getTime() > now)
+    );
+
+    setMessages(visible);
+    visible.forEach(scheduleExpiry);
+    fetchReactions(visible.map(m => m.id));
+
+    const unreadIds = visible
+      .filter(m => m.sender_id !== user.id && !m.is_read)
+      .map(m => m.id);
+    if (unreadIds.length > 0) {
+      await supabase.from('messages').update({ is_read: true }).in('id', unreadIds);
     }
   };
 
   const fetchReactions = async (messageIds) => {
     if (!messageIds.length) return;
     const { data } = await supabase
-      .from('message_reactions')
-      .select('*')
-      .in('message_id', messageIds);
+      .from('message_reactions').select('*').in('message_id', messageIds);
     if (data) {
       const grouped = {};
       data.forEach(r => {
@@ -170,27 +246,26 @@ export default function ChatScreen({ route, navigation }) {
   };
 
   const markAsRead = async (messageId, senderId) => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (senderId !== user?.id) {
+    if (senderId && senderId !== userIdRef.current) {
       await supabase.from('messages').update({ is_read: true }).eq('id', messageId);
     }
   };
 
   const updateTypingStatus = async (typing) => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    const uid = userIdRef.current;
+    if (!uid) return;
     await supabase.from('typing_status').upsert({
-      chat_id: chatId, user_id: user.id,
+      chat_id: chatId, user_id: uid,
       is_typing: typing, updated_at: new Date().toISOString(),
     }, { onConflict: 'chat_id,user_id' });
   };
 
   const clearTypingStatus = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+    const uid = userIdRef.current;
+    if (!uid) return;
     await supabase.from('typing_status')
       .update({ is_typing: false })
-      .eq('chat_id', chatId).eq('user_id', user.id);
+      .eq('chat_id', chatId).eq('user_id', uid);
   };
 
   const handleTyping = (text) => {
@@ -202,6 +277,13 @@ export default function ChatScreen({ route, navigation }) {
     }, 2000);
   };
 
+  const showSendError = () => {
+    Alert.alert(
+      'Сообщение не отправлено',
+      'Проверь интернет. Возможно, пользователь ограничил получение сообщений.'
+    );
+  };
+
   const sendMessage = async (text) => {
     const content = text || newMessage.trim();
     if (!content) return;
@@ -210,13 +292,17 @@ export default function ChatScreen({ route, navigation }) {
     setIsTyping(false);
     updateTypingStatus(false);
 
-    // Если редактируем
+    // Режим редактирования
     if (editingMessage) {
-      await supabase.from('messages').update({
+      const { error } = await supabase.from('messages').update({
         content,
         is_edited: true,
         edited_at: new Date().toISOString(),
       }).eq('id', editingMessage.id);
+      if (error) {
+        Alert.alert('Ошибка', 'Не удалось изменить сообщение');
+        return;
+      }
       setMessages(prev => prev.map(m =>
         m.id === editingMessage.id ? { ...m, content, is_edited: true } : m
       ));
@@ -225,7 +311,6 @@ export default function ChatScreen({ route, navigation }) {
       return;
     }
 
-    // Самоуничтожение
     let selfDestructAt = null;
     if (selfDestructSeconds) {
       selfDestructAt = new Date(Date.now() + selfDestructSeconds * 1000).toISOString();
@@ -241,62 +326,101 @@ export default function ChatScreen({ route, navigation }) {
       self_destruct_at: selfDestructAt,
     };
 
+    const replySnapshot = replyTo;
     setMessages(prev => [...prev, tempMessage]);
     setNewMessage('');
     setReplyTo(null);
     setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
 
-    const { data } = await supabase.from('messages').insert({
+    const { data, error } = await supabase.from('messages').insert({
       chat_id: chatId, sender_id: userId, content,
-      reply_to_content: replyTo?.content || null,
+      reply_to_content: replySnapshot?.content || null,
+      reply_to_sender: replySnapshot?.sender_id || null,
       is_delivered: true,
       self_destruct_after: selfDestructSeconds,
       self_destruct_at: selfDestructAt,
     }).select().single();
 
-    if (data) {
-      setMessages(prev => prev.map(m => m.id === tempMessage.id ? data : m));
-      // Планируем самоуничтожение
-      if (selfDestructSeconds && data.id) {
-        setTimeout(async () => {
-          await supabase.from('messages')
-            .update({ deleted_for_all: true })
-            .eq('id', data.id);
-          setMessages(prev => prev.filter(m => m.id !== data.id));
-        }, selfDestructSeconds * 1000);
+    if (error || !data) {
+      setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
+      if (!text) setNewMessage(content);
+      showSendError();
+      return;
+    }
+
+    // Заменяем временное сообщение настоящим (без дублей)
+    setMessages(prev => {
+      if (prev.some(m => m.id === data.id)) {
+        return prev.filter(m => m.id !== tempMessage.id);
       }
+      return prev.map(m => m.id === tempMessage.id ? data : m);
+    });
+
+    if (selfDestructSeconds) {
+      timersRef.current.push(setTimeout(async () => {
+        await supabase.from('messages')
+          .update({ deleted_for_all: true }).eq('id', data.id);
+        setMessages(prev => prev.filter(m => m.id !== data.id));
+      }, selfDestructSeconds * 1000));
     }
 
     sendPushNotification(content);
+    handleMentions(content, data.id);
     loadSuggestions();
   };
 
   const sendPushNotification = async (content) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
       const { data: members } = await supabase
         .from('chat_members').select('user_id')
-        .eq('chat_id', chatId).neq('user_id', user.id);
+        .eq('chat_id', chatId).neq('user_id', userIdRef.current);
       if (members?.length > 0) {
-        const { data: senderProfile } = await supabase
-          .from('profiles').select('full_name, username').eq('id', user.id).single();
-        const senderName = senderProfile?.full_name || senderProfile?.username || 'Пользователь';
         for (const member of members) {
-          await sendPushToUser(member.user_id, `💬 ${senderName}`,
+          await sendPushToUser(
+            member.user_id,
+            `💬 ${myNameRef.current}`,
             content.startsWith('[IMAGE]') ? '📸 Фото' : content,
-            { type: 'message', chatId });
+            { type: 'message', chatId }
+          );
         }
       }
     } catch (e) { }
   };
 
+  const handleMentions = async (content, messageId) => {
+    try {
+      const found = content.match(/@([\w.]+)/g);
+      if (!found) return;
+      const names = [...new Set(found.map(m => m.slice(1).toLowerCase()))];
+      for (const name of names) {
+        const { data: rows } = await supabase
+          .from('profiles').select('id').eq('custom_username', name).limit(1);
+        const target = rows?.[0];
+        if (!target || target.id === userIdRef.current) continue;
+        await supabase.from('mentions').insert({
+          chat_id: chatId,
+          message_id: messageId,
+          mentioned_user_id: target.id,
+        });
+        await sendPushToUser(
+          target.id,
+          '📣 Тебя упомянули',
+          `${myNameRef.current}: ${content}`,
+          { type: 'mention', chatId }
+        );
+      }
+    } catch (e) { }
+  };
+
   const addReaction = async (messageId, emoji) => {
+    if (!messageId || String(messageId).startsWith('temp-')) return;
     const existing = messageReactions[messageId]?.[emoji];
     const alreadyReacted = existing?.includes(userId);
 
     if (alreadyReacted) {
       await supabase.from('message_reactions')
-        .delete().eq('message_id', messageId).eq('user_id', userId).eq('emoji', emoji);
+        .delete().eq('message_id', messageId)
+        .eq('user_id', userId).eq('emoji', emoji);
     } else {
       await supabase.from('message_reactions').insert({
         message_id: messageId, user_id: userId, emoji
@@ -311,27 +435,28 @@ export default function ChatScreen({ route, navigation }) {
   const editMessage = (message) => {
     setEditingMessage(message);
     setNewMessage(message.content);
-    inputRef.current?.focus();
+    setTimeout(() => inputRef.current?.focus(), 100);
   };
 
   const clearChatHistory = () => {
-    Alert.alert('Очистить историю?', 'Все сообщения будут удалены у тебя', [
+    Alert.alert('Очистить историю?', 'Все сообщения исчезнут только у тебя', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Очистить', style: 'destructive',
         onPress: async () => {
-          await supabase.from('messages')
-            .update({ deleted_for_me: supabase.rpc('array_append_unique', {
-              arr: [], val: userId
-            })})
-            .eq('chat_id', chatId);
-          setMessages([]);
+          const { error } = await supabase.rpc('clear_chat_for_me', { cid: chatId });
+          if (error) {
+            Alert.alert('Ошибка', 'Не удалось очистить историю');
+          } else {
+            setMessages([]);
+          }
         }
       }
     ]);
   };
 
   const deleteMessage = (message) => {
+    if (!message) return;
     const isMe = message.sender_id === userId;
     Alert.alert('Сообщение', '', [
       { text: 'Отмена', style: 'cancel' },
@@ -360,9 +485,26 @@ export default function ChatScreen({ route, navigation }) {
     ].filter(Boolean));
   };
 
+  // На iPhone Alert сразу после закрытия Modal может не показаться — ждём чуть-чуть
+  const closeReactionsThen = (fn) => {
+    setShowReactions(false);
+    setTimeout(() => { if (fn) fn(); }, 350);
+  };
+
+  const reportMessage = (message) => {
+    if (!message) return;
+    navigation.navigate('Report', {
+      reportedUserId: message.sender_id,
+      chatId,
+      messageId: message.id,
+      messageContent: message.content,
+      userName: isGroup ? 'Участник группы' : userName,
+    });
+  };
+
   const pickImage = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Нет доступа'); return; }
+    if (status !== 'granted') { Alert.alert('Нет доступа', 'Разреши доступ к галерее'); return; }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.7, allowsEditing: true,
     });
@@ -371,7 +513,7 @@ export default function ChatScreen({ route, navigation }) {
 
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') { Alert.alert('Нет доступа'); return; }
+    if (status !== 'granted') { Alert.alert('Нет доступа', 'Разреши доступ к камере'); return; }
     const result = await ImagePicker.launchCameraAsync({ quality: 0.7, allowsEditing: true });
     if (!result.canceled && result.assets[0]) await uploadImage(result.assets[0].uri);
   };
@@ -389,10 +531,15 @@ export default function ChatScreen({ route, navigation }) {
         .from('chat-media').upload(fileName, arrayBuffer, { contentType, upsert: true });
       if (uploadError) throw uploadError;
       const { data: urlData } = supabase.storage.from('chat-media').getPublicUrl(fileName);
-      await supabase.from('messages').insert({
+      const { error: insertError } = await supabase.from('messages').insert({
         chat_id: chatId, sender_id: userId,
         content: `[IMAGE]${urlData.publicUrl}`, is_delivered: true,
       });
+      if (insertError) {
+        showSendError();
+      } else {
+        sendPushNotification('[IMAGE]');
+      }
     } catch (error) {
       Alert.alert('Ошибка', 'Не удалось загрузить фото');
     } finally {
@@ -438,8 +585,19 @@ export default function ChatScreen({ route, navigation }) {
     return 'rgba(255,255,255,0.5)';
   };
 
+  const getHeaderStatus = () => {
+    if (partnerTyping) return '✏️ печатает...';
+    if (isGroup) return 'Групповой чат';
+    if (!partner) return '';
+    if (isUserOnline(partner)) return '● Онлайн';
+    if (partner.online_visible === false || partner.last_seen_visibility === 'nobody') {
+      return 'Был(а) недавно';
+    }
+    return `Был(а) ${formatLastSeen(partner.last_seen)}`;
+  };
+
   const renderMessageContent = (content) => {
-    const parts = content.split(/(@\w+)/g);
+    const parts = (content || '').split(/(@[\w.]+)/g);
     return (
       <Text style={styles.messageText}>
         {parts.map((part, i) =>
@@ -454,6 +612,7 @@ export default function ChatScreen({ route, navigation }) {
   };
 
   const bg = getBackground(chatBackground);
+  const partnerOnline = isUserOnline(partner);
 
   const renderMessage = ({ item, index }) => {
     const isMe = item.sender_id === userId;
@@ -523,7 +682,6 @@ export default function ChatScreen({ route, navigation }) {
               </View>
             )}
 
-            {/* Реакции */}
             {hasReactions && (
               <View style={[styles.reactionsRow, isMe && styles.reactionsRowMe]}>
                 {Object.entries(reactions).map(([emoji, users]) => (
@@ -570,6 +728,10 @@ export default function ChatScreen({ route, navigation }) {
           onPress={() => {
             if (route.params?.userId) {
               navigation.navigate('UserProfile', { userId: route.params.userId });
+            } else if (isGroup) {
+              navigation.navigate('GroupInfo', {
+                chatId, groupName: userName, groupAvatar: route.params?.groupAvatar,
+              });
             }
           }}
         >
@@ -577,21 +739,26 @@ export default function ChatScreen({ route, navigation }) {
             <Image source={{ uri: route.params.avatarUrl }} style={styles.avatarImage} />
           ) : (
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>{userName?.[0]?.toUpperCase() || '?'}</Text>
-              <View style={styles.onlineDot} />
+              <Text style={styles.avatarText}>
+                {isGroup ? (route.params?.groupAvatar || '👥') : (userName?.[0]?.toUpperCase() || '?')}
+              </Text>
+              {partnerOnline && <View style={styles.onlineDot} />}
             </View>
           )}
           <View style={styles.headerInfo}>
-            <Text style={styles.headerName}>{userName}</Text>
-            <Text style={styles.headerStatus}>
-              {partnerTyping ? '✏️ печатает...' : '● Онлайн'}
+            <Text style={styles.headerName} numberOfLines={1}>{userName}</Text>
+            <Text style={[
+              styles.headerStatus,
+              !partnerOnline && !partnerTyping && { color: '#888' },
+            ]}>
+              {getHeaderStatus()}
             </Text>
           </View>
         </TouchableOpacity>
 
         <View style={styles.headerActions}>
           <TouchableOpacity style={styles.headerBtn}
-            onPress={() => navigation.navigate('Call', { userName })}>
+            onPress={() => navigation.navigate('Call', { userName, chatId, isVideo: true })}>
             <Ionicons name="videocam" size={18} color="#6C63FF" />
           </TouchableOpacity>
           <TouchableOpacity style={styles.headerBtn}
@@ -600,7 +767,7 @@ export default function ChatScreen({ route, navigation }) {
             })}>
             <Ionicons name="color-palette-outline" size={18} color="#6C63FF" />
           </TouchableOpacity>
-          {route.params?.isGroup && (
+          {isGroup && (
             <TouchableOpacity style={styles.headerBtn}
               onPress={() => navigation.navigate('GroupInfo', {
                 chatId, groupName: userName, groupAvatar: route.params?.groupAvatar,
@@ -659,7 +826,9 @@ export default function ChatScreen({ route, navigation }) {
         <View style={[styles.typingContainer, { backgroundColor: bg.colors[0] + 'EE' }]}>
           <View style={styles.typingBubble}>
             <Text style={styles.typingDots}>● ● ●</Text>
-            <Text style={styles.typingText}>{userName} печатает</Text>
+            <Text style={styles.typingText}>
+              {isGroup ? 'Кто-то печатает' : `${userName} печатает`}
+            </Text>
           </View>
         </View>
       )}
@@ -739,10 +908,11 @@ export default function ChatScreen({ route, navigation }) {
         </TouchableOpacity>
       </View>
 
-      {/* Реакции Modal */}
+      {/* Реакции и действия */}
       <Modal visible={showReactions} transparent animationType="fade">
         <TouchableOpacity
           style={styles.reactionsOverlay}
+          activeOpacity={1}
           onPress={() => { setShowReactions(false); setSelectedMessage(null); }}
         >
           <View style={styles.reactionsModal}>
@@ -760,19 +930,43 @@ export default function ChatScreen({ route, navigation }) {
             </View>
             <View style={styles.reactionActions}>
               <TouchableOpacity style={styles.reactionActionBtn}
-                onPress={() => { setReplyTo(selectedMessage); setShowReactions(false); }}>
+                onPress={() => {
+                  setReplyTo(selectedMessage);
+                  setShowReactions(false);
+                }}>
                 <Ionicons name="return-up-back" size={18} color="#6C63FF" />
                 <Text style={styles.reactionActionText}>Ответить</Text>
               </TouchableOpacity>
-              {selectedMessage?.sender_id === userId && (
+
+              {selectedMessage?.sender_id === userId &&
+                !isImageMessage(selectedMessage?.content) && (
                 <TouchableOpacity style={styles.reactionActionBtn}
-                  onPress={() => { editMessage(selectedMessage); setShowReactions(false); }}>
+                  onPress={() => {
+                    const m = selectedMessage;
+                    setShowReactions(false);
+                    editMessage(m);
+                  }}>
                   <Ionicons name="create-outline" size={18} color="#FFC107" />
                   <Text style={styles.reactionActionText}>Изменить</Text>
                 </TouchableOpacity>
               )}
+
+              {selectedMessage?.sender_id !== userId && (
+                <TouchableOpacity style={styles.reactionActionBtn}
+                  onPress={() => {
+                    const m = selectedMessage;
+                    closeReactionsThen(() => reportMessage(m));
+                  }}>
+                  <Ionicons name="flag-outline" size={18} color="#FF9F43" />
+                  <Text style={styles.reactionActionText}>Жалоба</Text>
+                </TouchableOpacity>
+              )}
+
               <TouchableOpacity style={styles.reactionActionBtn}
-                onPress={() => { deleteMessage(selectedMessage); setShowReactions(false); }}>
+                onPress={() => {
+                  const m = selectedMessage;
+                  closeReactionsThen(() => deleteMessage(m));
+                }}>
                 <Ionicons name="trash-outline" size={18} color="#FF4444" />
                 <Text style={[styles.reactionActionText, { color: '#FF4444' }]}>Удалить</Text>
               </TouchableOpacity>
@@ -781,10 +975,11 @@ export default function ChatScreen({ route, navigation }) {
         </TouchableOpacity>
       </Modal>
 
-      {/* Самоуничтожение Modal */}
+      {/* Самоуничтожение */}
       <Modal visible={showSelfDestruct} transparent animationType="slide">
         <TouchableOpacity
           style={styles.selfDestructOverlay}
+          activeOpacity={1}
           onPress={() => setShowSelfDestruct(false)}
         >
           <View style={styles.selfDestructModal}>
@@ -897,7 +1092,7 @@ const styles = StyleSheet.create({
   },
   replyPreviewText: { color: 'rgba(255,255,255,0.65)', fontSize: 11 },
   messageText: { color: '#fff', fontSize: 15, lineHeight: 20 },
-  mention: { color: '#6C63FF', fontWeight: 'bold' },
+  mention: { color: '#A29BFE', fontWeight: 'bold' },
   messageFooter: {
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'flex-end', gap: 4, marginTop: 3,

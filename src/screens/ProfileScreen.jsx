@@ -5,15 +5,16 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
+import { setOffline, stopPresence } from '../lib/presence';
 
 export default function ProfileScreen({ navigation }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [callSummaries, setCallSummaries] = useState([]);
 
   useEffect(() => {
     fetchProfile();
-    loadCallSummaries();
+    const unsub = navigation.addListener('focus', fetchProfile);
+    return unsub;
   }, []);
 
   const fetchProfile = async () => {
@@ -21,48 +22,32 @@ export default function ProfileScreen({ navigation }) {
     if (user) {
       const { data } = await supabase
         .from('profiles').select('*').eq('id', user.id).single();
-        if (data) {
-          setProfile({
-            ...data,
-            full_name: data.full_name || user.user_metadata?.full_name || user.email,
-            username: data.username || user.email,
-            avatar_url: data.avatar_url || null, // ← добавь это
-          });
-        }
+      if (data) {
+        setProfile({
+          ...data,
+          full_name: data.full_name || user.user_metadata?.full_name || 'Пользователь',
+        });
+      }
     }
     setLoading(false);
   };
 
-  const loadCallSummaries = () => {
-    // Моковые данные резюме звонков
-    setCallSummaries([
-      {
-        id: '1',
-        userName: 'Alish',
-        duration: '05:32',
-        date: 'Сегодня 13:20',
-        mood: '😊',
-        topics: ['Планы', 'Работа'],
-      },
-      {
-        id: '2',
-        userName: 'Тестирую',
-        duration: '02:15',
-        date: 'Вчера 18:45',
-        mood: '⚡',
-        topics: ['Встреча'],
-      },
-    ]);
-  };
-
-  const handleLogout = async () => {
+  const handleLogout = () => {
     Alert.alert('Выход', 'Ты уверен?', [
       { text: 'Отмена', style: 'cancel' },
       {
         text: 'Выйти', style: 'destructive',
         onPress: async () => {
+          try {
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) {
+              stopPresence(user.id);
+              await setOffline(user.id);
+            }
+          } catch (e) { }
           await supabase.auth.signOut();
-          navigation.replace('Login');
+          const root = navigation.getParent() || navigation;
+          root.reset({ index: 0, routes: [{ name: 'Login' }] });
         }
       }
     ]);
@@ -77,26 +62,23 @@ export default function ProfileScreen({ navigation }) {
   }
 
   const displayName = profile?.full_name || 'Пользователь';
-  const displayUsername = profile?.username || 'username';
-  const avatarLetter = displayName[0].toUpperCase();
   const avatarColor = profile?.avatar_color || '#6C63FF';
   const avatarEmoji = profile?.avatar_emoji || '😊';
 
   const menuItems = [
     { icon: 'trophy', label: 'Достижения', sub: 'Твои награды и очки', screen: 'Achievements', color: '#FFC107' },
-    { icon: 'document-text', label: 'Резюме звонков', sub: 'История разговоров', screen: 'CallSummaries', color: '#6C63FF' },
+    { icon: 'document-text', label: 'Резюме звонков', sub: 'История и заметки', screen: 'CallSummaries', color: '#6C63FF' },
+    { icon: 'language', label: 'Переводчик', sub: 'Перевод текста и голос', screen: 'Translate', color: '#00D2D3' },
+    { icon: 'bookmark', label: 'Избранное', sub: 'Заметки и сохранённое', screen: 'SavedMessages', color: '#FF9F43' },
+    { icon: 'ban', label: 'Заблокированные', sub: 'Управление блокировками', screen: 'BlockedUsers', color: '#FF4444' },
     { icon: 'settings', label: 'Настройки', sub: 'Профиль и безопасность', screen: 'Settings', color: '#888' },
-    { icon: 'notifications', label: 'Уведомления', sub: 'Управление уведомлениями', screen: null, color: '#FF9F43' },
-    { icon: 'document-text', label: 'Условия использования', sub: 'Правила сервиса', screen: 'Terms', color: '#00D2D3' },
+    { icon: 'help-circle', label: 'Помощь', sub: 'Вопросы и поддержка', screen: 'Help', color: '#A29BFE' },
     { icon: 'lock-closed', label: 'Конфиденциальность', sub: 'Политика данных', screen: 'Privacy', color: '#4CAF50' },
-    { icon: 'help-circle', label: 'Помощь', sub: 'FAQ и поддержка', screen: 'Help', color: '#A29BFE' },
-    { icon: 'bookmark', label: 'Избранное', sub: 'Заметки и сохранённое', screen: 'SavedMessages', color: '#FFC107' },
-{ icon: 'ban', label: 'Заблокированные', sub: 'Управление блокировками', screen: 'BlockedUsers', color: '#FF4444' },
+    { icon: 'reader', label: 'Условия использования', sub: 'Правила сервиса', screen: 'Terms', color: '#00D2D3' },
   ];
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Профиль</Text>
@@ -108,10 +90,8 @@ export default function ProfileScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      {/* Profile Card */}
+      {/* Карточка профиля */}
       <View style={styles.profileCard}>
-
-        {/* Настройки кнопка */}
         <TouchableOpacity
           style={styles.settingsQuickBtn}
           onPress={() => navigation.navigate('Settings')}
@@ -119,52 +99,50 @@ export default function ProfileScreen({ navigation }) {
           <Ionicons name="settings" size={20} color="#6C63FF" />
         </TouchableOpacity>
 
-        {/* Аватар */}
         <View style={styles.avatarContainer}>
-  {profile?.avatar_url ? (
-    <Image
-      source={{ uri: profile.avatar_url }}
-      style={styles.avatarImage}
-    />
-  ) : (
-    <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
-      <Text style={styles.avatarEmoji}>{avatarEmoji}</Text>
-    </View>
-  )}
-  <View style={styles.onlineBadge} />
-</View>
+          {profile?.avatar_url ? (
+            <Image source={{ uri: profile.avatar_url }} style={styles.avatarImage} />
+          ) : (
+            <View style={[styles.avatar, { backgroundColor: avatarColor }]}>
+              <Text style={styles.avatarEmoji}>{avatarEmoji}</Text>
+            </View>
+          )}
+          <View style={styles.onlineBadge} />
+        </View>
 
-        {/* Имя */}
         <Text style={styles.name}>{displayName}</Text>
-        <Text style={styles.username}>@{displayUsername}</Text>
 
-        {/* О себе */}
-        {profile?.bio ? (
-          <Text style={styles.bio}>{profile.bio}</Text>
+        {profile?.custom_username ? (
+          <Text style={styles.username}>@{profile.custom_username}</Text>
         ) : (
-          <TouchableOpacity
-            onPress={() => navigation.navigate('Settings')}
-          >
-            <Text style={styles.addBio}>+ Добавить о себе</Text>
+          <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
+            <Text style={styles.addLink}>+ Задать @username</Text>
           </TouchableOpacity>
         )}
 
-        {/* Телефон */}
-        {profile?.phone_number && profile?.phone_visible && (
+        {profile?.bio ? (
+          <Text style={styles.bio}>{profile.bio}</Text>
+        ) : (
+          <TouchableOpacity onPress={() => navigation.navigate('Settings')}>
+            <Text style={styles.addLink}>+ Добавить о себе</Text>
+          </TouchableOpacity>
+        )}
+
+        {profile?.phone_number && profile?.phone_visible ? (
           <View style={styles.phoneRow}>
             <Ionicons name="call-outline" size={14} color="#6C63FF" />
             <Text style={styles.phoneText}>{profile.phone_number}</Text>
           </View>
-        )}
+        ) : null}
       </View>
 
       {/* Меню */}
       <View style={styles.menuContainer}>
-        {menuItems.map((item, i) => (
+        {menuItems.map((item) => (
           <TouchableOpacity
-            key={i}
+            key={item.screen}
             style={styles.menuItem}
-            onPress={() => item.screen && navigation.navigate(item.screen)}
+            onPress={() => navigation.navigate(item.screen)}
             activeOpacity={0.7}
           >
             <View style={[styles.menuIcon, { backgroundColor: item.color + '22' }]}>
@@ -228,9 +206,6 @@ const styles = StyleSheet.create({
   },
   avatarImage: {
     width: 90, height: 90, borderRadius: 45,
-  },
-  avatarImage: {
-    width: 90, height: 90, borderRadius: 45,
     shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.6, shadowRadius: 20, elevation: 20,
   },
@@ -241,14 +216,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#4CAF50', borderWidth: 2, borderColor: '#111120',
   },
   name: { fontSize: 22, fontWeight: 'bold', color: '#fff', marginBottom: 4 },
-  username: { fontSize: 14, color: '#555', marginBottom: 10 },
+  username: { fontSize: 14, color: '#6C63FF', marginBottom: 10 },
+  addLink: {
+    fontSize: 14, color: '#6C63FF',
+    marginBottom: 8, fontWeight: '600',
+  },
   bio: {
     fontSize: 14, color: '#888', textAlign: 'center',
     maxWidth: 280, lineHeight: 20, marginBottom: 8,
-  },
-  addBio: {
-    fontSize: 14, color: '#6C63FF',
-    marginBottom: 8, fontWeight: '600',
   },
   phoneRow: {
     flexDirection: 'row', alignItems: 'center',

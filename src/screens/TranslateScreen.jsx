@@ -1,280 +1,389 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, Animated, Dimensions
+  View, Text, StyleSheet, TouchableOpacity, TextInput,
+  ScrollView, Alert, ActivityIndicator, Share,
+  KeyboardAvoidingView, Platform, Modal, FlatList
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Speech from 'expo-speech';
 
-const { width } = Dimensions.get('window');
+// Оставь пустым: тогда у каждого пользователя свой дневной лимит (по его IP).
+// Если впишешь почту, лимит вырастет, но станет общим на всех.
+const CONTACT_EMAIL = '';
 
-const LANGUAGES = [
-  { code: 'kz', name: 'Казахский', flag: '🇰🇿' },
-  { code: 'ru', name: 'Русский', flag: '🇷🇺' },
-  { code: 'en', name: 'Английский', flag: '🇬🇧' },
-  { code: 'tr', name: 'Турецкий', flag: '🇹🇷' },
-  { code: 'zh', name: 'Китайский', flag: '🇨🇳' },
-  { code: 'ar', name: 'Арабский', flag: '🇸🇦' },
+const MAX_INPUT = 1000;
+const MAX_CHUNK_BYTES = 450;
+
+const LANGS = [
+  { code: 'ru', name: 'Русский', flag: '🇷🇺', voice: 'ru-RU' },
+  { code: 'en', name: 'English', flag: '🇬🇧', voice: 'en-US' },
+  { code: 'kk', name: 'Қазақша', flag: '🇰🇿', voice: 'kk-KZ' },
+  { code: 'tr', name: 'Türkçe', flag: '🇹🇷', voice: 'tr-TR' },
+  { code: 'uk', name: 'Українська', flag: '🇺🇦', voice: 'uk-UA' },
+  { code: 'de', name: 'Deutsch', flag: '🇩🇪', voice: 'de-DE' },
+  { code: 'fr', name: 'Français', flag: '🇫🇷', voice: 'fr-FR' },
+  { code: 'es', name: 'Español', flag: '🇪🇸', voice: 'es-ES' },
+  { code: 'it', name: 'Italiano', flag: '🇮🇹', voice: 'it-IT' },
+  { code: 'pt', name: 'Português', flag: '🇵🇹', voice: 'pt-PT' },
+  { code: 'ar', name: 'العربية', flag: '🇸🇦', voice: 'ar-SA' },
+  { code: 'zh-CN', name: '中文', flag: '🇨🇳', voice: 'zh-CN' },
+  { code: 'ja', name: '日本語', flag: '🇯🇵', voice: 'ja-JP' },
+  { code: 'ko', name: '한국어', flag: '🇰🇷', voice: 'ko-KR' },
 ];
 
-const DEMO_TRANSLATIONS = [
-  {
-    original: 'Сәлеметсіз бе, қалыңыз қалай?',
-    translated: 'Здравствуйте, как вы поживаете?',
-    from: '🇰🇿', to: '🇷🇺', time: '0.3с'
-  },
-  {
-    original: 'Бүгін ауа райы өте жақсы',
-    translated: 'Сегодня погода очень хорошая',
-    from: '🇰🇿', to: '🇷🇺', time: '0.2с'
-  },
-  {
-    original: 'Кездесуге қуаныштымын',
-    translated: 'Рад встрече с вами',
-    from: '🇰🇿', to: '🇷🇺', time: '0.4с'
-  },
-];
+const findLang = (code) => LANGS.find(l => l.code === code) || LANGS[0];
+
+// Размер текста в байтах (кириллица = 2 байта на символ)
+const byteLength = (s) => encodeURIComponent(s).replace(/%[A-F\d]{2}/g, 'U').length;
+
+// Режем длинный текст на куски, которые влезают в лимит сервиса
+function splitIntoChunks(text) {
+  const sentences = text.match(/[^.!?…\n]+[.!?…]*\s*/g) || [text];
+  const chunks = [];
+  let current = '';
+
+  const flush = () => {
+    if (current.trim()) chunks.push(current.trim());
+    current = '';
+  };
+
+  for (const sentence of sentences) {
+    if (byteLength(sentence) > MAX_CHUNK_BYTES) {
+      flush();
+      let part = '';
+      for (const word of sentence.split(/\s+/)) {
+        const candidate = part ? `${part} ${word}` : word;
+        if (byteLength(candidate) > MAX_CHUNK_BYTES) {
+          if (part) chunks.push(part.trim());
+          part = word;
+        } else {
+          part = candidate;
+        }
+      }
+      if (part) chunks.push(part.trim());
+      continue;
+    }
+    if (byteLength(current + sentence) > MAX_CHUNK_BYTES) flush();
+    current += sentence;
+  }
+  flush();
+  return chunks;
+}
+
+async function translateChunk(text, from, to, signal) {
+  const params = new URLSearchParams({ q: text, langpair: `${from}|${to}` });
+  if (CONTACT_EMAIL) params.append('de', CONTACT_EMAIL);
+
+  const res = await fetch(
+    `https://api.mymemory.translated.net/get?${params.toString()}`,
+    { signal }
+  );
+  if (!res.ok) throw new Error('network');
+
+  const data = await res.json();
+  const translated = data?.responseData?.translatedText;
+  const status = Number(data?.responseStatus);
+
+  // Сервис иногда присылает предупреждение о лимите как обычный ответ
+  if (/MYMEMORY WARNING|QUOTA/i.test(String(translated || '')) ||
+      /QUOTA|LIMIT/i.test(String(data?.responseDetails || ''))) {
+    throw new Error('quota');
+  }
+  if (status && status !== 200) throw new Error('api');
+  if (!translated) throw new Error('api');
+  return translated;
+}
 
 export default function TranslateScreen({ navigation }) {
-  const [fromLang, setFromLang] = useState(LANGUAGES[0]);
-  const [toLang, setToLang] = useState(LANGUAGES[1]);
-  const [isListening, setIsListening] = useState(false);
-  const [translations, setTranslations] = useState([]);
-  const [showFromPicker, setShowFromPicker] = useState(false);
-  const [showToPicker, setShowToPicker] = useState(false);
-  const [demoIndex, setDemoIndex] = useState(0);
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const pulseLoop = useRef(null);
+  const [from, setFrom] = useState('ru');
+  const [to, setTo] = useState('en');
+  const [input, setInput] = useState('');
+  const [output, setOutput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [picker, setPicker] = useState(null); // 'from' | 'to' | null
+  const [history, setHistory] = useState([]);
 
-  const startPulse = () => {
-    pulseLoop.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.3, duration: 600, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-      ])
-    );
-    pulseLoop.current.start();
-  };
+  const abortRef = useRef(null);
 
-  const stopPulse = () => {
-    pulseLoop.current?.stop();
-    Animated.timing(pulseAnim, { toValue: 1, duration: 200, useNativeDriver: true }).start();
-  };
+  useEffect(() => {
+    return () => {
+      Speech.stop();
+      abortRef.current?.abort();
+    };
+  }, []);
 
-  const toggleListening = () => {
-    if (isListening) {
-      setIsListening(false);
-      stopPulse();
-    } else {
-      setIsListening(true);
-      startPulse();
+  const doTranslate = async () => {
+    const text = input.trim();
+    if (!text) {
+      Alert.alert('Пусто', 'Напиши или продиктуй текст для перевода');
+      return;
+    }
+    if (from === to) {
+      Alert.alert('Одинаковые языки', 'Выбери разные языки для перевода');
+      return;
+    }
 
-      // Симуляция AI перевода
-      const demo = DEMO_TRANSLATIONS[demoIndex % DEMO_TRANSLATIONS.length];
-      setTimeout(() => {
-        setTranslations(prev => [{ ...demo, id: Date.now() }, ...prev]);
-        setDemoIndex(i => i + 1);
-        setIsListening(false);
-        stopPulse();
-      }, 2500);
+    Speech.stop();
+    setSpeaking(false);
+    setLoading(true);
+    setOutput('');
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    try {
+      const chunks = splitIntoChunks(text);
+      const parts = [];
+      for (const chunk of chunks) {
+        parts.push(await translateChunk(chunk, from, to, controller.signal));
+      }
+      const result = parts.join(' ');
+      setOutput(result);
+      setHistory(prev => [
+        { id: String(Date.now()), from, to, source: text, result },
+        ...prev,
+      ].slice(0, 8));
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        Alert.alert('Долго отвечает', 'Сервис перевода не ответил. Попробуй ещё раз.');
+      } else if (e?.message === 'quota') {
+        Alert.alert(
+          'Лимит исчерпан',
+          'Дневной лимит бесплатного перевода закончился. Попробуй завтра.'
+        );
+      } else {
+        Alert.alert(
+          'Не удалось перевести',
+          'Проверь интернет. Если языка нет в сервисе, выбери другой.'
+        );
+      }
+    } finally {
+      clearTimeout(timeout);
+      setLoading(false);
     }
   };
 
-  const swapLanguages = () => {
-    const temp = fromLang;
-    setFromLang(toLang);
-    setToLang(temp);
+  const swap = () => {
+    setFrom(to);
+    setTo(from);
+    if (output) {
+      setInput(output);
+      setOutput('');
+    }
   };
 
+  const speak = async () => {
+    if (!output) return;
+    if (speaking) {
+      Speech.stop();
+      setSpeaking(false);
+      return;
+    }
+    setSpeaking(true);
+    Speech.speak(output, {
+      language: findLang(to).voice,
+      onDone: () => setSpeaking(false),
+      onStopped: () => setSpeaking(false),
+      onError: () => {
+        setSpeaking(false);
+        Alert.alert('Нет голоса', 'На телефоне нет голоса для этого языка');
+      },
+    });
+  };
+
+  const shareResult = async () => {
+    if (!output) return;
+    try {
+      await Share.share({ message: output });
+    } catch (e) { }
+  };
+
+  const clearAll = () => {
+    Speech.stop();
+    setSpeaking(false);
+    setInput('');
+    setOutput('');
+  };
+
+  const restore = (item) => {
+    setFrom(item.from);
+    setTo(item.to);
+    setInput(item.source);
+    setOutput(item.result);
+  };
+
+  const pickLanguage = (code) => {
+    if (picker === 'from') {
+      if (code === to) setTo(from);
+      setFrom(code);
+    } else {
+      if (code === from) setFrom(to);
+      setTo(code);
+    }
+    setPicker(null);
+  };
+
+  const fromLang = findLang(from);
+  const toLang = findLang(to);
+
   return (
-    <View style={styles.container}>
-      {/* Header */}
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
       <View style={styles.header}>
-        <TouchableOpacity
-          style={styles.backBtn}
-          onPress={() => navigation.goBack()}
-        >
+        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={22} color="#fff" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>🌐 Voice Translate</Text>
-        <View style={styles.aiBadge}>
-          <Text style={styles.aiBadgeText}>AI</Text>
-        </View>
+        <Text style={styles.headerTitle}>🌐 Переводчик</Text>
       </View>
 
-      <ScrollView showsVerticalScrollIndicator={false}>
-
-        {/* Language Picker */}
-        <View style={styles.langContainer}>
-          {/* From */}
-          <TouchableOpacity
-            style={styles.langCard}
-            onPress={() => { setShowFromPicker(!showFromPicker); setShowToPicker(false); }}
-          >
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        contentContainerStyle={styles.content}
+      >
+        {/* Выбор языков */}
+        <View style={styles.langRow}>
+          <TouchableOpacity style={styles.langBtn} onPress={() => setPicker('from')}>
             <Text style={styles.langFlag}>{fromLang.flag}</Text>
-            <Text style={styles.langName}>{fromLang.name}</Text>
-            <Ionicons name="chevron-down" size={16} color="#555" />
+            <Text style={styles.langName} numberOfLines={1}>{fromLang.name}</Text>
           </TouchableOpacity>
 
-          {/* Swap */}
-          <TouchableOpacity style={styles.swapBtn} onPress={swapLanguages}>
+          <TouchableOpacity style={styles.swapBtn} onPress={swap}>
             <Ionicons name="swap-horizontal" size={22} color="#6C63FF" />
           </TouchableOpacity>
 
-          {/* To */}
-          <TouchableOpacity
-            style={styles.langCard}
-            onPress={() => { setShowToPicker(!showToPicker); setShowFromPicker(false); }}
-          >
+          <TouchableOpacity style={styles.langBtn} onPress={() => setPicker('to')}>
             <Text style={styles.langFlag}>{toLang.flag}</Text>
-            <Text style={styles.langName}>{toLang.name}</Text>
-            <Ionicons name="chevron-down" size={16} color="#555" />
+            <Text style={styles.langName} numberOfLines={1}>{toLang.name}</Text>
           </TouchableOpacity>
         </View>
 
-        {/* From Picker */}
-        {showFromPicker && (
-          <View style={styles.picker}>
-            {LANGUAGES.filter(l => l.code !== toLang.code).map(lang => (
-              <TouchableOpacity
-                key={lang.code}
-                style={styles.pickerItem}
-                onPress={() => { setFromLang(lang); setShowFromPicker(false); }}
-              >
-                <Text style={styles.pickerFlag}>{lang.flag}</Text>
-                <Text style={styles.pickerName}>{lang.name}</Text>
-                {fromLang.code === lang.code && (
-                  <Ionicons name="checkmark" size={18} color="#6C63FF" />
-                )}
+        {/* Ввод */}
+        <View style={styles.card}>
+          <TextInput
+            style={styles.input}
+            placeholder="Напиши или продиктуй текст..."
+            placeholderTextColor="#555"
+            value={input}
+            onChangeText={setInput}
+            multiline
+            maxLength={MAX_INPUT}
+          />
+          <View style={styles.cardFooter}>
+            <Text style={styles.counter}>{input.length}/{MAX_INPUT}</Text>
+            {input.length > 0 && (
+              <TouchableOpacity onPress={clearAll}>
+                <Ionicons name="close-circle" size={20} color="#555" />
               </TouchableOpacity>
-            ))}
+            )}
           </View>
-        )}
+        </View>
 
-        {/* To Picker */}
-        {showToPicker && (
-          <View style={styles.picker}>
-            {LANGUAGES.filter(l => l.code !== fromLang.code).map(lang => (
-              <TouchableOpacity
-                key={lang.code}
-                style={styles.pickerItem}
-                onPress={() => { setToLang(lang); setShowToPicker(false); }}
-              >
-                <Text style={styles.pickerFlag}>{lang.flag}</Text>
-                <Text style={styles.pickerName}>{lang.name}</Text>
-                {toLang.code === lang.code && (
-                  <Ionicons name="checkmark" size={18} color="#6C63FF" />
-                )}
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
+        <Text style={styles.tip}>
+          🎤 Для голоса нажми значок микрофона на клавиатуре iPhone
+        </Text>
 
-        {/* Mic Button */}
-        <View style={styles.micContainer}>
-          <Animated.View style={[styles.micPulse, {
-            transform: [{ scale: pulseAnim }],
-            opacity: isListening ? 0.3 : 0,
-          }]} />
-          <Animated.View style={[styles.micPulse2, {
-            transform: [{ scale: pulseAnim }],
-            opacity: isListening ? 0.15 : 0,
-          }]} />
+        <TouchableOpacity
+          style={[styles.translateBtn, (loading || !input.trim()) && { opacity: 0.5 }]}
+          onPress={doTranslate}
+          disabled={loading || !input.trim()}
+        >
+          {loading
+            ? <ActivityIndicator color="#fff" />
+            : <>
+                <Ionicons name="language" size={20} color="#fff" />
+                <Text style={styles.translateBtnText}>Перевести</Text>
+              </>
+          }
+        </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.micBtn, isListening && styles.micBtnActive]}
-            onPress={toggleListening}
-            activeOpacity={0.8}
-          >
-            <Ionicons
-              name={isListening ? 'stop' : 'mic'}
-              size={40}
-              color="#fff"
-            />
-          </TouchableOpacity>
-
-          <Text style={styles.micStatus}>
-            {isListening
-              ? `Слушаю... Говори на ${fromLang.name}`
-              : 'Нажми и говори'
-            }
-          </Text>
-
-          {isListening && (
-            <View style={styles.waveContainer}>
-              {[...Array(5)].map((_, i) => (
-                <Animated.View
-                  key={i}
-                  style={[styles.wave, {
-                    height: Math.random() * 30 + 10,
-                    backgroundColor: '#6C63FF',
-                  }]}
+        {/* Результат */}
+        {output ? (
+          <View style={[styles.card, styles.resultCard]}>
+            <Text style={styles.resultLabel}>{toLang.flag} {toLang.name}</Text>
+            <Text style={styles.resultText} selectable>{output}</Text>
+            <View style={styles.resultActions}>
+              <TouchableOpacity style={styles.actionBtn} onPress={speak}>
+                <Ionicons
+                  name={speaking ? 'stop-circle' : 'volume-high'}
+                  size={20} color="#6C63FF"
                 />
-              ))}
-            </View>
-          )}
-        </View>
-
-        {/* Info Card */}
-        <View style={styles.infoCard}>
-          <Ionicons name="information-circle" size={18} color="#6C63FF" />
-          <Text style={styles.infoText}>
-            ИИ переводит твою речь мгновенно. Оригинальный голос приглушается, поверх звучит перевод.
-          </Text>
-        </View>
-
-        {/* История переводов */}
-        {translations.length > 0 && (
-          <View style={styles.historyContainer}>
-            <View style={styles.historyHeader}>
-              <Text style={styles.historyTitle}>История переводов</Text>
-              <TouchableOpacity onPress={() => setTranslations([])}>
-                <Text style={styles.clearBtn}>Очистить</Text>
+                <Text style={styles.actionText}>{speaking ? 'Стоп' : 'Озвучить'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.actionBtn} onPress={shareResult}>
+                <Ionicons name="share-outline" size={20} color="#6C63FF" />
+                <Text style={styles.actionText}>Поделиться</Text>
               </TouchableOpacity>
             </View>
-
-            {translations.map((t) => (
-              <View key={t.id} style={styles.translationCard}>
-                <View style={styles.translationHeader}>
-                  <View style={styles.langBadge}>
-                    <Text>{t.from}</Text>
-                    <Ionicons name="arrow-forward" size={12} color="#555" />
-                    <Text>{t.to}</Text>
-                  </View>
-                  <View style={styles.timeBadge}>
-                    <Ionicons name="flash" size={12} color="#4CAF50" />
-                    <Text style={styles.timeText}>{t.time}</Text>
-                  </View>
-                </View>
-
-                <View style={styles.translationBody}>
-                  <View style={styles.originalBox}>
-                    <Text style={styles.originalLabel}>Оригинал</Text>
-                    <Text style={styles.originalText}>{t.original}</Text>
-                  </View>
-                  <View style={styles.divider} />
-                  <View style={styles.translatedBox}>
-                    <Text style={styles.translatedLabel}>Перевод</Text>
-                    <Text style={styles.translatedText}>{t.translated}</Text>
-                  </View>
-                </View>
-              </View>
-            ))}
           </View>
-        )}
+        ) : null}
 
-        {/* Demo hint */}
-        {translations.length === 0 && (
-          <View style={styles.demoHint}>
-            <Text style={styles.demoEmoji}>👆</Text>
-            <Text style={styles.demoText}>
-              Нажми на микрофон и скажи что-нибудь на {fromLang.name}!
-            </Text>
+        {/* История */}
+        {history.length > 0 && (
+          <View style={styles.historySection}>
+            <Text style={styles.historyTitle}>Недавние переводы</Text>
+            {history.map(item => (
+              <TouchableOpacity
+                key={item.id}
+                style={styles.historyItem}
+                onPress={() => restore(item)}
+              >
+                <Text style={styles.historyLangs}>
+                  {findLang(item.from).flag} → {findLang(item.to).flag}
+                </Text>
+                <View style={styles.historyTexts}>
+                  <Text style={styles.historySource} numberOfLines={1}>{item.source}</Text>
+                  <Text style={styles.historyResult} numberOfLines={1}>{item.result}</Text>
+                </View>
+              </TouchableOpacity>
+            ))}
           </View>
         )}
 
         <View style={{ height: 40 }} />
       </ScrollView>
-    </View>
+
+      {/* Выбор языка */}
+      <Modal visible={picker !== null} transparent animationType="slide">
+        <TouchableOpacity
+          style={styles.modalOverlay}
+          activeOpacity={1}
+          onPress={() => setPicker(null)}
+        >
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>
+              {picker === 'from' ? 'Перевести с' : 'Перевести на'}
+            </Text>
+            <FlatList
+              data={LANGS}
+              keyExtractor={item => item.code}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => {
+                const selected = (picker === 'from' ? from : to) === item.code;
+                return (
+                  <TouchableOpacity
+                    style={[styles.langOption, selected && styles.langOptionActive]}
+                    onPress={() => pickLanguage(item.code)}
+                  >
+                    <Text style={styles.langOptionFlag}>{item.flag}</Text>
+                    <Text style={[styles.langOptionName, selected && { color: '#fff' }]}>
+                      {item.name}
+                    </Text>
+                    {selected && (
+                      <Ionicons name="checkmark-circle" size={20} color="#6C63FF" />
+                    )}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          </View>
+        </TouchableOpacity>
+      </Modal>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -289,112 +398,87 @@ const styles = StyleSheet.create({
     width: 38, height: 38, borderRadius: 19,
     backgroundColor: '#1A1A2E', alignItems: 'center', justifyContent: 'center',
   },
-  headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#fff', flex: 1 },
-  aiBadge: {
-    backgroundColor: '#6C63FF', borderRadius: 8,
-    paddingHorizontal: 10, paddingVertical: 4,
-  },
-  aiBadgeText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
-  langContainer: {
-    flexDirection: 'row', alignItems: 'center',
-    margin: 16, gap: 10,
-  },
-  langCard: {
-    flex: 1, backgroundColor: '#111120',
-    borderRadius: 16, padding: 14,
-    alignItems: 'center', gap: 6,
+  headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
+  content: { padding: 16 },
+  langRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 14 },
+  langBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#111120', borderRadius: 14, padding: 12,
     borderWidth: 1, borderColor: '#1A1A2E',
   },
-  langFlag: { fontSize: 32 },
-  langName: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  langFlag: { fontSize: 22 },
+  langName: { flex: 1, color: '#fff', fontSize: 14, fontWeight: '600' },
   swapBtn: {
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: '#1A1A2E', alignItems: 'center',
-    justifyContent: 'center', borderWidth: 1, borderColor: '#6C63FF',
+    width: 42, height: 42, borderRadius: 21,
+    backgroundColor: '#111120', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#1A1A2E',
   },
-  picker: {
-    marginHorizontal: 16, backgroundColor: '#111120',
-    borderRadius: 16, borderWidth: 1, borderColor: '#1A1A2E',
-    marginBottom: 8, overflow: 'hidden',
+  card: {
+    backgroundColor: '#111120', borderRadius: 18, padding: 14,
+    borderWidth: 1, borderColor: '#1A1A2E',
   },
-  pickerItem: {
-    flexDirection: 'row', alignItems: 'center',
-    padding: 14, gap: 12,
-    borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
+  input: {
+    color: '#fff', fontSize: 17, minHeight: 110,
+    textAlignVertical: 'top', lineHeight: 24,
   },
-  pickerFlag: { fontSize: 24 },
-  pickerName: { flex: 1, color: '#fff', fontSize: 15 },
-  micContainer: {
-    alignItems: 'center', justifyContent: 'center',
-    padding: 40, position: 'relative',
-  },
-  micPulse: {
-    position: 'absolute', width: 140, height: 140,
-    borderRadius: 70, backgroundColor: '#6C63FF',
-  },
-  micPulse2: {
-    position: 'absolute', width: 180, height: 180,
-    borderRadius: 90, backgroundColor: '#6C63FF',
-  },
-  micBtn: {
-    width: 110, height: 110, borderRadius: 55,
-    backgroundColor: '#6C63FF', alignItems: 'center',
-    justifyContent: 'center', marginBottom: 20,
-    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8, shadowRadius: 25, elevation: 25,
-  },
-  micBtnActive: { backgroundColor: '#FF4444' },
-  micStatus: { color: '#888', fontSize: 15, textAlign: 'center' },
-  waveContainer: {
-    flexDirection: 'row', alignItems: 'center',
-    gap: 4, marginTop: 16, height: 40,
-  },
-  wave: { width: 4, borderRadius: 2, minHeight: 10 },
-  infoCard: {
-    flexDirection: 'row', alignItems: 'flex-start',
-    marginHorizontal: 16, backgroundColor: 'rgba(108,99,255,0.1)',
-    borderRadius: 14, padding: 14, gap: 10,
-    borderWidth: 1, borderColor: 'rgba(108,99,255,0.2)',
-    marginBottom: 16,
-  },
-  infoText: { flex: 1, color: '#888', fontSize: 13, lineHeight: 20 },
-  historyContainer: { marginHorizontal: 16 },
-  historyHeader: {
+  cardFooter: {
     flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', marginBottom: 12,
+    alignItems: 'center', marginTop: 6,
   },
-  historyTitle: { fontSize: 16, fontWeight: 'bold', color: '#fff' },
-  clearBtn: { color: '#FF4444', fontSize: 13 },
-  translationCard: {
-    backgroundColor: '#111120', borderRadius: 18,
-    borderWidth: 1, borderColor: '#1A1A2E', marginBottom: 12,
-    overflow: 'hidden',
+  counter: { color: '#555', fontSize: 11 },
+  tip: { color: '#555', fontSize: 12, marginTop: 10, marginBottom: 14 },
+  translateBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    gap: 8, backgroundColor: '#6C63FF', borderRadius: 14, padding: 16,
+    shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4, shadowRadius: 10, elevation: 8,
   },
-  translationHeader: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    alignItems: 'center', padding: 12,
-    borderBottomWidth: 1, borderBottomColor: '#1A1A2E',
+  translateBtnText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  resultCard: { marginTop: 16, borderColor: '#6C63FF55' },
+  resultLabel: { color: '#6C63FF', fontSize: 12, fontWeight: '700', marginBottom: 8 },
+  resultText: { color: '#fff', fontSize: 18, lineHeight: 26 },
+  resultActions: {
+    flexDirection: 'row', gap: 10, marginTop: 14,
+    paddingTop: 12, borderTopWidth: 1, borderTopColor: '#1A1A2E',
   },
-  langBadge: {
+  actionBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: 'rgba(108,99,255,0.12)', borderRadius: 12,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderWidth: 1, borderColor: 'rgba(108,99,255,0.3)',
   },
-  timeBadge: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    backgroundColor: 'rgba(76,175,80,0.1)', borderRadius: 8,
-    paddingHorizontal: 8, paddingVertical: 3,
+  actionText: { color: '#6C63FF', fontSize: 13, fontWeight: '600' },
+  historySection: { marginTop: 24 },
+  historyTitle: {
+    color: '#555', fontSize: 12, fontWeight: '700',
+    textTransform: 'uppercase', marginBottom: 10,
   },
-  timeText: { color: '#4CAF50', fontSize: 12, fontWeight: '600' },
-  translationBody: { padding: 14 },
-  originalBox: { marginBottom: 10 },
-  originalLabel: { color: '#555', fontSize: 11, marginBottom: 4 },
-  originalText: { color: '#aaa', fontSize: 15, fontStyle: 'italic' },
-  divider: { height: 1, backgroundColor: '#1A1A2E', marginBottom: 10 },
-  translatedBox: {},
-  translatedLabel: { color: '#6C63FF', fontSize: 11, marginBottom: 4 },
-  translatedText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-  demoHint: {
-    alignItems: 'center', padding: 30, gap: 12,
+  historyItem: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: '#111120', borderRadius: 14, padding: 12,
+    marginBottom: 8, borderWidth: 1, borderColor: '#1A1A2E',
   },
-  demoEmoji: { fontSize: 40 },
-  demoText: { color: '#555', fontSize: 15, textAlign: 'center', lineHeight: 22 },
+  historyLangs: { fontSize: 16 },
+  historyTexts: { flex: 1 },
+  historySource: { color: '#888', fontSize: 13, marginBottom: 2 },
+  historyResult: { color: '#fff', fontSize: 14, fontWeight: '600' },
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#111120', borderTopLeftRadius: 24,
+    borderTopRightRadius: 24, padding: 20, maxHeight: '70%',
+  },
+  modalTitle: {
+    fontSize: 18, fontWeight: 'bold', color: '#fff',
+    textAlign: 'center', marginBottom: 14,
+  },
+  langOption: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    padding: 14, borderRadius: 12, marginBottom: 6,
+    backgroundColor: '#0D0D1A', borderWidth: 1, borderColor: '#1A1A2E',
+  },
+  langOptionActive: { borderColor: '#6C63FF', backgroundColor: '#1A1A3E' },
+  langOptionFlag: { fontSize: 22 },
+  langOptionName: { flex: 1, color: '#aaa', fontSize: 15 },
 });

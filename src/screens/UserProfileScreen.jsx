@@ -5,6 +5,13 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
+import { formatLastSeen } from '../lib/presence';
+import { getOrCreatePrivateChat } from '../lib/chats';
+
+const isUserOnline = (p) => {
+  if (!p || p.online_visible === false || !p.is_online || !p.last_seen) return false;
+  return Date.now() - new Date(p.last_seen).getTime() < 70000;
+};
 
 export default function UserProfileScreen({ route, navigation }) {
   const { userId } = route.params;
@@ -12,25 +19,50 @@ export default function UserProfileScreen({ route, navigation }) {
   const [stories, setStories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [myId, setMyId] = useState(null);
+  const [isBlocked, setIsBlocked] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [, setTick] = useState(0);
 
+  const isMe = myId === userId;
+
+  // Раз в 30 секунд обновляем статус "в сети"
   useEffect(() => {
-    getMyId();
-    fetchProfile();
-    fetchStories();
+    const i = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(i);
   }, []);
 
-  const getMyId = async () => {
+  useEffect(() => {
+    init();
+  }, [userId]);
+
+  const init = async () => {
     const { data: { user } } = await supabase.auth.getUser();
-    if (user) setMyId(user.id);
+    if (user) {
+      setMyId(user.id);
+      const { data: blockRow } = await supabase
+        .from('blocked_users')
+        .select('id')
+        .eq('blocker_id', user.id)
+        .eq('blocked_id', userId)
+        .maybeSingle();
+      setIsBlocked(!!blockRow);
+    }
+    await fetchProfile(user?.id);
   };
 
-  const fetchProfile = async () => {
+  const fetchProfile = async (currentUserId) => {
     const { data } = await supabase
       .from('profiles')
       .select('*')
       .eq('id', userId)
       .single();
-    if (data) setProfile(data);
+    if (data) {
+      setProfile(data);
+      // Истории показываем, только если человек их не скрыл (свои — всегда)
+      if (data.stories_visible !== false || data.id === currentUserId) {
+        fetchStories();
+      }
+    }
     setLoading(false);
   };
 
@@ -39,40 +71,103 @@ export default function UserProfileScreen({ route, navigation }) {
       .from('stories')
       .select('*')
       .eq('user_id', userId)
-      .eq('stories_visible', true)
-      .gt('expires_at', new Date().toISOString());
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false });
     if (data) setStories(data);
   };
 
+  const displayName = profile?.full_name || profile?.custom_username || 'Пользователь';
+
   const openChat = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-    const { data: existingChats } = await supabase
-      .from('chat_members').select('chat_id').eq('user_id', user.id);
-    const myChatsIds = existingChats?.map(c => c.chat_id) || [];
-    let chatId = null;
-
-    if (myChatsIds.length > 0) {
-      const { data: sharedChat } = await supabase
-        .from('chat_members').select('chat_id')
-        .eq('user_id', userId)
-        .in('chat_id', myChatsIds).limit(1);
-      if (sharedChat?.length > 0) chatId = sharedChat[0].chat_id;
+    if (busy) return;
+    setBusy(true);
+    try {
+      const chatId = await getOrCreatePrivateChat(userId);
+      navigation.navigate('Chat', {
+        chatId,
+        userName: displayName,
+        userId,
+        avatarUrl: profile?.avatar_url || null,
+      });
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось открыть чат');
+    } finally {
+      setBusy(false);
     }
+  };
 
-    if (!chatId) {
-      const { data: newChat } = await supabase
-        .from('chats').insert({}).select().single();
-      chatId = newChat.id;
-      await supabase.from('chat_members').insert([
-        { chat_id: chatId, user_id: user.id },
-        { chat_id: chatId, user_id: userId }
+  const startCall = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const chatId = await getOrCreatePrivateChat(userId);
+      navigation.navigate('Call', {
+        userName: displayName,
+        chatId,
+        isVideo: true,
+      });
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось начать звонок');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleBlock = () => {
+    if (isBlocked) {
+      Alert.alert('Разблокировать?', `${displayName} снова сможет тебе писать`, [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: 'Разблокировать',
+          onPress: async () => {
+            const { data: { user } } = await supabase.auth.getUser();
+            await supabase.from('blocked_users')
+              .delete()
+              .eq('blocker_id', user.id)
+              .eq('blocked_id', userId);
+            setIsBlocked(false);
+          }
+        }
       ]);
+      return;
     }
 
-    navigation.navigate('Chat', {
-      chatId,
-      userName: profile?.full_name || profile?.username
+    Alert.alert('Заблокировать?', `${displayName} не сможет писать тебе`, [
+      { text: 'Отмена', style: 'cancel' },
+      {
+        text: 'Заблокировать', style: 'destructive',
+        onPress: async () => {
+          const { data: { user } } = await supabase.auth.getUser();
+          const { error } = await supabase.from('blocked_users').upsert(
+            { blocker_id: user.id, blocked_id: userId },
+            { onConflict: 'blocker_id,blocked_id' }
+          );
+          if (error) {
+            Alert.alert('Ошибка', error.message);
+          } else {
+            setIsBlocked(true);
+            Alert.alert('✅', 'Пользователь заблокирован');
+          }
+        }
+      }
+    ]);
+  };
+
+  const openReport = () => {
+    navigation.navigate('Report', {
+      reportedUserId: userId,
+      userName: displayName,
     });
+  };
+
+  const getStatusText = () => {
+    if (!profile || profile.online_visible === false) return null;
+    if (isUserOnline(profile)) return { text: 'Онлайн', online: true };
+    if (profile.last_seen_visibility === 'nobody') {
+      return { text: 'Был(а) недавно', online: false };
+    }
+    const ls = formatLastSeen(profile.last_seen);
+    return { text: `Был(а) ${ls.charAt(0).toLowerCase()}${ls.slice(1)}`, online: false };
   };
 
   if (loading) {
@@ -83,28 +178,9 @@ export default function UserProfileScreen({ route, navigation }) {
     );
   }
 
-  const blockUser = async () => {
-    Alert.alert('Заблокировать?', 'Пользователь не сможет писать тебе', [
-      { text: 'Отмена', style: 'cancel' },
-      {
-        text: 'Заблокировать', style: 'destructive',
-        onPress: async () => {
-          const { data: { user } } = await supabase.auth.getUser();
-          await supabase.from('blocked_users').insert({
-            blocker_id: user.id,
-            blocked_id: userId,
-          });
-          Alert.alert('✅', 'Пользователь заблокирован');
-          navigation.goBack();
-        }
-      }
-    ]);
-  };
-
-  const displayName = profile?.full_name || profile?.username || 'Пользователь';
-  const avatarLetter = displayName[0].toUpperCase();
   const avatarColor = profile?.avatar_color || '#6C63FF';
   const avatarEmoji = profile?.avatar_emoji || '😊';
+  const status = getStatusText();
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -127,27 +203,29 @@ export default function UserProfileScreen({ route, navigation }) {
         )}
 
         <Text style={styles.name}>{displayName}</Text>
-        <Text style={styles.username}>@{profile?.username || 'username'}</Text>
+        {profile?.custom_username ? (
+          <Text style={styles.username}>@{profile.custom_username}</Text>
+        ) : (
+          <View style={{ height: 12 }} />
+        )}
 
         {profile?.bio ? (
           <Text style={styles.bio}>{profile.bio}</Text>
         ) : null}
 
-        {/* Статус онлайн */}
-        {profile?.online_visible && (
+        {status && (
           <View style={styles.onlineRow}>
             <View style={[styles.onlineDot, {
-              backgroundColor: profile?.is_online ? '#4CAF50' : '#888'
+              backgroundColor: status.online ? '#4CAF50' : '#888'
             }]} />
             <Text style={[styles.onlineText, {
-              color: profile?.is_online ? '#4CAF50' : '#888'
+              color: status.online ? '#4CAF50' : '#888'
             }]}>
-              {profile?.is_online ? 'Онлайн' : 'Не в сети'}
+              {status.text}
             </Text>
           </View>
         )}
 
-        {/* Телефон */}
         {profile?.phone_number && profile?.phone_visible && (
           <View style={styles.phoneRow}>
             <Ionicons name="call-outline" size={16} color="#6C63FF" />
@@ -157,31 +235,58 @@ export default function UserProfileScreen({ route, navigation }) {
       </View>
 
       {/* Кнопки действий */}
-      <View style={styles.actionsRow}>
-        <TouchableOpacity style={styles.actionBtn} onPress={openChat}>
-          <Ionicons name="chatbubble" size={22} color="#fff" />
-          <Text style={styles.actionBtnText}>Написать</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.actionBtnSecondary]}
-          onPress={() => navigation.navigate('Call', { userName: displayName })}
-        >
-          <Ionicons name="videocam" size={22} color="#6C63FF" />
-          <Text style={[styles.actionBtnText, { color: '#6C63FF' }]}>Позвонить</Text>
-        </TouchableOpacity>
-      </View>
+      {!isMe && (
+        <View style={styles.actionsRow}>
+          <TouchableOpacity style={styles.actionBtn} onPress={openChat} disabled={busy}>
+            {busy
+              ? <ActivityIndicator color="#fff" />
+              : <>
+                  <Ionicons name="chatbubble" size={22} color="#fff" />
+                  <Text style={styles.actionBtnText}>Написать</Text>
+                </>
+            }
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.actionBtn, styles.actionBtnSecondary]}
+            onPress={startCall}
+            disabled={busy}
+          >
+            <Ionicons name="videocam" size={22} color="#6C63FF" />
+            <Text style={[styles.actionBtnText, { color: '#6C63FF' }]}>Позвонить</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
-      <TouchableOpacity style={styles.blockBtn} onPress={blockUser}>
-  <Ionicons name="ban" size={18} color="#FF4444" />
-  <Text style={styles.blockBtnText}>Заблокировать</Text>
-</TouchableOpacity>
+      {/* Блокировка и жалоба */}
+      {!isMe && (
+        <>
+          <TouchableOpacity
+            style={isBlocked ? styles.unblockBtn : styles.blockBtn}
+            onPress={toggleBlock}
+          >
+            <Ionicons
+              name={isBlocked ? 'checkmark-circle' : 'ban'}
+              size={18}
+              color={isBlocked ? '#4CAF50' : '#FF4444'}
+            />
+            <Text style={isBlocked ? styles.unblockBtnText : styles.blockBtnText}>
+              {isBlocked ? 'Разблокировать' : 'Заблокировать'}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.reportBtn} onPress={openReport}>
+            <Ionicons name="flag-outline" size={18} color="#FF9F43" />
+            <Text style={styles.reportBtnText}>Пожаловаться</Text>
+          </TouchableOpacity>
+        </>
+      )}
 
       {/* Истории */}
       {stories.length > 0 && (
         <View style={styles.storiesSection}>
           <Text style={styles.sectionTitle}>📊 Истории</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {stories.map((story, i) => (
+            {stories.map((story) => (
               <TouchableOpacity
                 key={story.id}
                 style={[styles.storyItem, { backgroundColor: story.background_color }]}
@@ -235,7 +340,7 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   name: { fontSize: 24, fontWeight: 'bold', color: '#fff', marginBottom: 4 },
-  username: { fontSize: 14, color: '#555', marginBottom: 12 },
+  username: { fontSize: 14, color: '#6C63FF', marginBottom: 12 },
   bio: {
     fontSize: 14, color: '#888', textAlign: 'center',
     maxWidth: 280, lineHeight: 20, marginBottom: 12,
@@ -265,7 +370,31 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#6C63FF',
   },
   actionBtnText: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  storiesSection: { padding: 16 },
+  blockBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'center', gap: 8,
+    marginHorizontal: 16, padding: 14,
+    backgroundColor: '#1A0A0A', borderRadius: 14,
+    borderWidth: 1, borderColor: '#3A1A1A', marginTop: 4,
+  },
+  blockBtnText: { color: '#FF4444', fontSize: 14, fontWeight: '600' },
+  unblockBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'center', gap: 8,
+    marginHorizontal: 16, padding: 14,
+    backgroundColor: '#0A1A0A', borderRadius: 14,
+    borderWidth: 1, borderColor: '#1A3A1A', marginTop: 4,
+  },
+  unblockBtnText: { color: '#4CAF50', fontSize: 14, fontWeight: '600' },
+  reportBtn: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'center', gap: 8,
+    marginHorizontal: 16, padding: 14,
+    backgroundColor: '#1A1200', borderRadius: 14,
+    borderWidth: 1, borderColor: '#3A2A00', marginTop: 8,
+  },
+  reportBtnText: { color: '#FF9F43', fontSize: 14, fontWeight: '600' },
+  storiesSection: { padding: 16, marginTop: 8 },
   sectionTitle: {
     fontSize: 16, fontWeight: 'bold', color: '#fff', marginBottom: 12,
   },
@@ -276,13 +405,4 @@ const styles = StyleSheet.create({
   },
   storyEmoji: { fontSize: 32 },
   storyText: { color: '#fff', fontSize: 13, fontWeight: '600' },
-
-  blockBtn: {
-    flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'center', gap: 8,
-    marginHorizontal: 16, padding: 14,
-    backgroundColor: '#1A0A0A', borderRadius: 14,
-    borderWidth: 1, borderColor: '#3A1A1A', marginTop: 8,
-  },
-  blockBtnText: { color: '#FF4444', fontSize: 14, fontWeight: '600' },
 });

@@ -1,67 +1,159 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  View, Text, StyleSheet, TextInput,
-  TouchableOpacity, FlatList, ActivityIndicator
+  View, Text, StyleSheet, TextInput, TouchableOpacity,
+  FlatList, ActivityIndicator, Image, Alert, Keyboard
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
+import { formatLastSeen } from '../lib/presence';
+import { getOrCreatePrivateChat } from '../lib/chats';
+
+const COLORS = ['#6C63FF', '#FF6B6B', '#00D2D3', '#FF9F43', '#4CAF50', '#A29BFE'];
+
+const isUserOnline = (u) => {
+  if (!u || u.online_visible === false || !u.is_online || !u.last_seen) return false;
+  return Date.now() - new Date(u.last_seen).getTime() < 70000;
+};
+
+const getStatus = (u) => {
+  if (isUserOnline(u)) return { text: '● Онлайн', online: true };
+  if (u.online_visible === false || u.last_seen_visibility === 'nobody') {
+    return { text: '● Был(а) недавно', online: false };
+  }
+  return { text: `● ${formatLastSeen(u.last_seen)}`, online: false };
+};
 
 export default function SearchUsersScreen({ navigation }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searched, setSearched] = useState(false);
+  const [opening, setOpening] = useState(null);
+  const debounceRef = useRef(null);
+  const requestRef = useRef(0);
 
-  const search = async () => {
-    if (!query.trim()) return;
+  // Поиск сам запускается через 0.5 сек после последнего символа
+  useEffect(() => {
+    clearTimeout(debounceRef.current);
+    const q = cleanQuery(query);
+    if (q.length < 2) {
+      setResults([]);
+      setSearched(false);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
-    setSearched(true);
+    debounceRef.current = setTimeout(() => runSearch(q), 500);
+    return () => clearTimeout(debounceRef.current);
+  }, [query]);
 
-    const q = query.trim().toLowerCase().replace('@', '');
+  // Убираем символы, которые ломают запрос к базе
+  const cleanQuery = (text) =>
+    text.trim().replace(/^@+/, '').replace(/[,()%*\\"':;]/g, '').trim();
 
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .or(`custom_username.ilike.%${q}%,full_name.ilike.%${q}%,username.ilike.%${q}%`)
-      .limit(20);
+  const runSearch = async (q) => {
+    const requestId = ++requestRef.current;
+    try {
+      const { data: { user: me } } = await supabase.auth.getUser();
+      if (!me) return;
 
-    if (data) setResults(data);
-    setLoading(false);
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .or(`custom_username.ilike.%${q}%,full_name.ilike.%${q}%`)
+        .neq('id', me.id)
+        .eq('is_test_account', false)
+        .limit(20);
+      if (error) throw error;
+
+      const { data: blocks } = await supabase
+        .from('blocked_users')
+        .select('blocked_id')
+        .eq('blocker_id', me.id);
+      const blockedIds = new Set((blocks || []).map(b => b.blocked_id));
+
+      // Игнорируем устаревший ответ, если пользователь уже ввёл другое
+      if (requestId !== requestRef.current) return;
+      setResults((data || []).filter(u => !blockedIds.has(u.id)));
+      setSearched(true);
+    } catch (e) {
+      if (requestId === requestRef.current) {
+        setResults([]);
+        setSearched(true);
+      }
+    } finally {
+      if (requestId === requestRef.current) setLoading(false);
+    }
   };
 
-  const openChat = async (user) => {
-    const { data: { user: me } } = await supabase.auth.getUser();
-    const { data: existingChats } = await supabase
-      .from('chat_members').select('chat_id').eq('user_id', me.id);
-    const myChatsIds = existingChats?.map(c => c.chat_id) || [];
-    let chatId = null;
-
-    if (myChatsIds.length > 0) {
-      const { data: sharedChat } = await supabase
-        .from('chat_members').select('chat_id')
-        .eq('user_id', user.id)
-        .in('chat_id', myChatsIds).limit(1);
-      if (sharedChat?.length > 0) chatId = sharedChat[0].chat_id;
+  const openChat = async (item) => {
+    if (opening) return;
+    setOpening(item.id);
+    try {
+      Keyboard.dismiss();
+      const chatId = await getOrCreatePrivateChat(item.id);
+      navigation.navigate('Chat', {
+        chatId,
+        userName: item.full_name || item.custom_username || 'Пользователь',
+        userId: item.id,
+        avatarUrl: item.avatar_url || null,
+      });
+    } catch (e) {
+      Alert.alert('Ошибка', 'Не удалось открыть чат');
+    } finally {
+      setOpening(null);
     }
-
-    if (!chatId) {
-      const { data: newChat } = await supabase
-        .from('chats').insert({}).select().single();
-      chatId = newChat.id;
-      await supabase.from('chat_members').insert([
-        { chat_id: chatId, user_id: me.id },
-        { chat_id: chatId, user_id: user.id }
-      ]);
-    }
-
-    navigation.navigate('Chat', {
-      chatId,
-      userName: user.full_name || user.custom_username || user.username,
-      userId: user.id,
-    });
   };
 
-  const COLORS = ['#6C63FF', '#FF6B6B', '#00D2D3', '#FF9F43', '#4CAF50', '#A29BFE'];
+  const clearAll = () => {
+    setQuery('');
+    setResults([]);
+    setSearched(false);
+  };
+
+  const renderItem = ({ item, index }) => {
+    const name = item.full_name || item.custom_username || 'Пользователь';
+    const status = getStatus(item);
+    return (
+      <TouchableOpacity
+        style={styles.userCard}
+        onPress={() => openChat(item)}
+        activeOpacity={0.7}
+      >
+        <TouchableOpacity
+          onPress={() => navigation.navigate('UserProfile', { userId: item.id })}
+        >
+          {item.avatar_url ? (
+            <Image source={{ uri: item.avatar_url }} style={styles.avatar} />
+          ) : (
+            <View style={[styles.avatar, { backgroundColor: COLORS[index % COLORS.length] }]}>
+              <Text style={styles.avatarText}>{name[0].toUpperCase()}</Text>
+            </View>
+          )}
+          <View style={[styles.onlineDot, {
+            backgroundColor: status.online ? '#4CAF50' : '#2A2A3E'
+          }]} />
+        </TouchableOpacity>
+
+        <View style={styles.userInfo}>
+          <Text style={styles.userName} numberOfLines={1}>{name}</Text>
+          {item.custom_username ? (
+            <Text style={styles.userUsername}>@{item.custom_username}</Text>
+          ) : null}
+          <Text style={[styles.userStatus, { color: status.online ? '#4CAF50' : '#555' }]}>
+            {status.text}
+          </Text>
+        </View>
+
+        <TouchableOpacity style={styles.msgBtn} onPress={() => openChat(item)}>
+          {opening === item.id
+            ? <ActivityIndicator size="small" color="#fff" />
+            : <Ionicons name="chatbubble" size={16} color="#fff" />
+          }
+        </TouchableOpacity>
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={styles.container}>
@@ -72,7 +164,6 @@ export default function SearchUsersScreen({ navigation }) {
         <Text style={styles.headerTitle}>🔍 Поиск людей</Text>
       </View>
 
-      {/* Поиск */}
       <View style={styles.searchRow}>
         <View style={styles.searchBox}>
           <Ionicons name="at" size={18} color="#6C63FF" />
@@ -82,84 +173,50 @@ export default function SearchUsersScreen({ navigation }) {
             placeholderTextColor="#555"
             value={query}
             onChangeText={setQuery}
-            onSubmitEditing={search}
             autoCapitalize="none"
+            autoCorrect={false}
             autoFocus
+            returnKeyType="search"
           />
           {query.length > 0 && (
-            <TouchableOpacity onPress={() => { setQuery(''); setResults([]); setSearched(false); }}>
+            <TouchableOpacity onPress={clearAll}>
               <Ionicons name="close-circle" size={16} color="#555" />
             </TouchableOpacity>
           )}
         </View>
-        <TouchableOpacity style={styles.searchBtn} onPress={search}>
-          <Ionicons name="search" size={20} color="#fff" />
-        </TouchableOpacity>
       </View>
 
-      <Text style={styles.hint}>
-        Ищи по @username, имени или email
-      </Text>
-
       {loading ? (
-        <View style={styles.loadingContainer}>
+        <View style={styles.centerBox}>
           <ActivityIndicator size="large" color="#6C63FF" />
-          <Text style={styles.loadingText}>Ищем...</Text>
+          <Text style={styles.centerText}>Ищем...</Text>
         </View>
-      ) : searched && results.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Text style={styles.emptyEmoji}>🔍</Text>
-          <Text style={styles.emptyTitle}>Никого не найдено</Text>
-          <Text style={styles.emptySub}>Попробуй другой @username или имя</Text>
+      ) : !searched ? (
+        <View style={styles.centerBox}>
+          <Text style={styles.bigEmoji}>🌍</Text>
+          <Text style={styles.centerTitle}>Найди друзей</Text>
+          <Text style={styles.centerSub}>
+            Введи @username или имя человека. Минимум 2 символа.
+          </Text>
+        </View>
+      ) : results.length === 0 ? (
+        <View style={styles.centerBox}>
+          <Text style={styles.bigEmoji}>🔍</Text>
+          <Text style={styles.centerTitle}>Никого не найдено</Text>
+          <Text style={styles.centerSub}>
+            Проверь написание. У человека должен быть задан @username в настройках.
+          </Text>
         </View>
       ) : (
         <FlatList
           data={results}
           keyExtractor={item => item.id}
+          renderItem={renderItem}
           contentContainerStyle={styles.list}
-          renderItem={({ item, index }) => {
-            const name = item.full_name || item.custom_username || item.username || 'Пользователь';
-            const username = item.custom_username || item.username;
-            return (
-              <TouchableOpacity
-                style={styles.userCard}
-                onPress={() => openChat(item)}
-                activeOpacity={0.7}
-              >
-                <View style={[styles.avatar, { backgroundColor: COLORS[index % COLORS.length] }]}>
-                  <Text style={styles.avatarText}>{name[0].toUpperCase()}</Text>
-                  <View style={[styles.onlineDot, {
-                    backgroundColor: item.is_online ? '#4CAF50' : '#333'
-                  }]} />
-                </View>
-                <View style={styles.userInfo}>
-                  <Text style={styles.userName}>{name}</Text>
-                  {username && (
-                    <Text style={styles.userUsername}>@{username}</Text>
-                  )}
-                  <Text style={[styles.userStatus, {
-                    color: item.is_online ? '#4CAF50' : '#555'
-                  }]}>
-                    {item.is_online ? '● Онлайн' : '● Не в сети'}
-                  </Text>
-                </View>
-                <View style={styles.userActions}>
-                  <TouchableOpacity
-                    style={styles.msgBtn}
-                    onPress={() => openChat(item)}
-                  >
-                    <Ionicons name="chatbubble" size={16} color="#fff" />
-                  </TouchableOpacity>
-                </View>
-              </TouchableOpacity>
-            );
-          }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
           ListHeaderComponent={
-            results.length > 0 ? (
-              <Text style={styles.resultsCount}>
-                Найдено: {results.length}
-              </Text>
-            ) : null
+            <Text style={styles.resultsCount}>Найдено: {results.length}</Text>
           }
         />
       )}
@@ -179,31 +236,23 @@ const styles = StyleSheet.create({
     backgroundColor: '#1A1A2E', alignItems: 'center', justifyContent: 'center',
   },
   headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#fff' },
-  searchRow: {
-    flexDirection: 'row', padding: 16, gap: 10, alignItems: 'center',
-  },
+  searchRow: { padding: 16 },
   searchBox: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8,
+    flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: '#111120', borderRadius: 14,
     paddingHorizontal: 14, paddingVertical: 12,
     borderWidth: 1, borderColor: '#1A1A2E',
   },
   searchInput: { flex: 1, color: '#fff', fontSize: 15 },
-  searchBtn: {
-    width: 46, height: 46, borderRadius: 23,
-    backgroundColor: '#6C63FF', alignItems: 'center', justifyContent: 'center',
+  centerBox: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    padding: 40, gap: 8,
   },
-  hint: {
-    color: '#444', fontSize: 12,
-    paddingHorizontal: 16, marginBottom: 8,
-  },
-  loadingContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  loadingText: { color: '#888', fontSize: 14 },
-  emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
-  emptyEmoji: { fontSize: 60, marginBottom: 16 },
-  emptyTitle: { fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 8 },
-  emptySub: { fontSize: 14, color: '#555', textAlign: 'center' },
-  list: { padding: 16 },
+  centerText: { color: '#888', fontSize: 14, marginTop: 8 },
+  bigEmoji: { fontSize: 56, marginBottom: 8 },
+  centerTitle: { fontSize: 18, fontWeight: 'bold', color: '#fff' },
+  centerSub: { fontSize: 14, color: '#555', textAlign: 'center', lineHeight: 20 },
+  list: { padding: 16, paddingTop: 0 },
   resultsCount: { color: '#555', fontSize: 12, marginBottom: 10 },
   userCard: {
     flexDirection: 'row', alignItems: 'center',
@@ -213,7 +262,7 @@ const styles = StyleSheet.create({
   },
   avatar: {
     width: 52, height: 52, borderRadius: 26,
-    alignItems: 'center', justifyContent: 'center', position: 'relative',
+    alignItems: 'center', justifyContent: 'center',
   },
   avatarText: { fontSize: 22, fontWeight: 'bold', color: '#fff' },
   onlineDot: {
@@ -225,10 +274,8 @@ const styles = StyleSheet.create({
   userName: { fontSize: 16, fontWeight: 'bold', color: '#fff', marginBottom: 2 },
   userUsername: { fontSize: 13, color: '#6C63FF', marginBottom: 2 },
   userStatus: { fontSize: 12 },
-  userActions: {},
   msgBtn: {
     width: 38, height: 38, borderRadius: 19,
     backgroundColor: '#6C63FF', alignItems: 'center', justifyContent: 'center',
   },
 });
-
